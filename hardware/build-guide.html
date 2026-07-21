@@ -215,12 +215,12 @@
       <div class="card"><div class="k">Charging</div><div class="v">USB-C</div><div class="s">XIAO's built-in LiPo charger — no extra board</div></div>
       <div class="card"><div class="k">Power / record</div><div class="v">Slide switch</div><div class="s">On = auto-record when moving with a GPS fix</div></div>
       <div class="card"><div class="k">Markers</div><div class="v">One button</div><div class="s">12 mm glove-friendly top button = drop marker</div></div>
-      <div class="card"><div class="k">Status</div><div class="v">One LED</div><div class="s">NeoPixel behind the case wall — 4 states</div></div>
+      <div class="card"><div class="k">Status</div><div class="v">OLED</div><div class="s">0.91" screen — clock/data + all status (LED dropped)</div></div>
     </div>
     <p>Everything else — live dashboard, reviewing rides, naming, exporting — already exists in the Tripper app.</p>
     <div class="note marker">
       <b>Scope pivot — e-bike edition (2026-07-21)</b>
-      The puck now targets the e-bike: powered from the bike's USB (<b>no LiPo, no slide switch</b>) and <b>BLE-first with no microSD</b> — the phone records through the Tripper app's recorder pipeline, so the old v2 BLE link <em>is</em> the product. Consequences: LiPo + SD module go to the spares bin, pins D3/D8–D10 are free again, the auto-record state machine moves into the app, and the puck becomes a stateless sensor that boots with the bike. Marker button and NeoPixel stay (marker now goes over BLE; LED shows fix/connection state). Trade-off accepted with open eyes: <b>no BLE link = no data for that stretch</b> — the SD "black box" is gone; re-add it later if a lost ride ever hurts. Verify the bike's USB doesn't auto-cut at low load or at standstill.
+      The puck now targets the e-bike: powered from the bike's USB (<b>no LiPo, no slide switch</b>) and <b>BLE-first with no microSD</b> — the phone records through the Tripper app's recorder pipeline, so the old v2 BLE link <em>is</em> the product. Consequences: LiPo + SD module go to the spares bin, pins D3/D8–D10 are free again, the auto-record state machine moves into the app, and the puck becomes a stateless sensor that boots with the bike. Marker button stays (marker goes over BLE); the NeoPixel was dropped — the 0.91" OLED carries all status, plus a second button (D2) for screen-hold and mount-zero. Trade-off accepted with open eyes: <b>no BLE link = no data for that stretch</b> — the SD "black box" is gone; re-add it later if a lost ride ever hurts. Verify the bike's USB doesn't auto-cut at low load or at standstill.
     </div>
     <div class="note">
       <b>Design rule</b>
@@ -374,7 +374,7 @@
           <tr><td class="mono">D7 (RX)</td><td class="mono">GPIO44</td><td>GPS <span class="mono">TX</span></td><td>UART (NMEA / UBX in)</td></tr>
           <tr><td class="mono">D1</td><td class="mono">GPIO2</td><td>Marker button → GND</td><td>Input, internal pull-up — 12 mm glove button in the final case</td></tr>
           <tr><td class="mono">D2</td><td class="mono">GPIO3</td><td>Hold/zero button → GND (HW-483)</td><td>Click = pin screen · long-hold = zero attitude (saved to NVS)</td></tr>
-          <tr><td class="mono">D0</td><td class="mono">GPIO1</td><td>NeoPixel <span class="mono">DIN</span></td><td>Status LED</td></tr>
+          <tr><td class="mono">D0</td><td class="mono">GPIO1</td><td><em>free</em></td><td>NeoPixel dropped 2026-07-21 — the OLED carries all status</td></tr>
           <tr><td class="mono">D3, D8–D10</td><td class="mono">—</td><td><em>free</em> (former SD pins)</td><td>e-bike edition: no SD</td></tr>
           <tr><td class="mono">USB-C</td><td>—</td><td>E-bike USB outlet / power bank</td><td>Power — no battery; the puck boots with the bike</td></tr>
           <tr><td class="mono">3V3 / GND</td><td>—</td><td>All module VCC / GND</td><td>Power rails</td></tr>

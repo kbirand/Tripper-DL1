@@ -27,8 +27,7 @@ Tripper-side `ExternalSensorSource` (Swift), enclosure, field ride.
 | Seeed XIAO ESP32-S3 | MCU, BLE 5.0, USB-C power |
 | DFRobot Gravity 10DOF (BNO055 + BMP280) | On-chip sensor fusion + barometer, I²C |
 | u-blox NEO-M8 GPS (GY-GPSU3 carrier) | 5 Hz position/speed/time, UART @ 115200 |
-| SSD1306 0.91" OLED 128×32 | Clock / live-data screens, I²C `0x3C` |
-| WS2812 NeoPixel ×1 | Status LED |
+| SSD1306 0.91" OLED 128×32 | Clock / live-data screens + all status, I²C `0x3C` |
 | 12 mm button | Marker (glove-friendly) |
 | HW-483 button | Screen hold / attitude zero |
 
@@ -36,12 +35,11 @@ Tripper-side `ExternalSensorSource` (Swift), enclosure, field ride.
 
 | Pin | Function |
 |---|---|
-| D0 | NeoPixel DIN |
 | D1 | Marker button → GND (internal pull-up) |
 | D2 | Hold/zero button → GND (internal pull-up) |
 | D4 / D5 | I²C SDA / SCL — BNO055 `0x28`, BMP280 `0x76`, OLED `0x3C` @ 100 kHz |
 | D6 / D7 | UART TX→GPS RX / RX←GPS TX @ 115200 |
-| D3, D8–D10 | free |
+| D0, D3, D8–D10 | free |
 
 The I²C bus **must run at 100 kHz** — the BNO055's clock-stretching upsets
 ESP32 I²C at higher speeds (validated: 59,722 reads / 0 errors / 10 min).
@@ -57,7 +55,7 @@ the top:
                                   │
                                   │ USB-C
                       ┌───────────┴───────────┐
- NeoPixel DIN ────────┤ D0                 5V ├─ n/c
+ n/c ─────────────────┤ D0                 5V ├─ n/c
  Marker button ○──────┤ D1                GND ├────────● GND rail
  Hold/Zero button ○───┤ D2                3V3 ├────────● 3V3 rail
  n/c ─────────────────┤ D3                D10 ├─ n/c
@@ -106,7 +104,7 @@ Arduino sketches in [`hardware/firmware/`](hardware/firmware/):
 ```sh
 arduino-cli core install esp32:esp32
 arduino-cli lib install "Adafruit BNO055" "Adafruit BMP280 Library" \
-  "Adafruit SSD1306" "Adafruit NeoPixel" "TinyGPSPlus" "NimBLE-Arduino"
+  "Adafruit SSD1306" "TinyGPSPlus" "NimBLE-Arduino"
 cd hardware/firmware/tripper_puck
 arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 .
 arduino-cli upload  --fqbn esp32:esp32:XIAO_ESP32S3 -p /dev/cu.usbmodem* .
@@ -116,19 +114,13 @@ arduino-cli upload  --fqbn esp32:esp32:XIAO_ESP32S3 -p /dev/cu.usbmodem* .
 
 | Input | Action |
 |---|---|
-| Marker button (D1) click | Marker counter++ in telemetry · blue flash · MARK splash |
+| Marker button (D1) click | Marker counter++ in telemetry · MARK splash |
 | Hold button (D2) click | Pin / unpin the current OLED screen (border = pinned) |
 | Hold button (D2) 10 s hold | Zero roll/pitch/yaw at current orientation (progress bar → ZEROED) |
 
-| LED | Meaning |
-|---|---|
-| Amber blink | No GPS fix |
-| Green solid | Fix, waiting for phone |
-| Red slow pulse | Connected & streaming |
-| Blue flash | Marker · Green flash: zeroed |
-
-OLED alternates every 5 s between a GPS clock screen (UTC+3) and a data
-screen (speed hero, roll/pitch, satellites, g, link state).
+All status lives on the OLED, which alternates every 5 s between a GPS
+clock screen (UTC+3) and a data screen (speed hero, roll/pitch,
+satellites, g, fix dot, link state).
 
 ## BLE protocol
 
@@ -171,8 +163,8 @@ uptime_s u32 · temp_x10 i16 · marker u8 · reserved u8`
 
 | Byte | Action |
 |---|---|
-| `0x01` | Marker ack — blue flash + MARK splash |
-| `0x03` | Identify — LED rainbow + OLED invert, 2 s |
+| `0x01` | Marker ack — MARK splash on the OLED |
+| `0x03` | Identify — OLED inverts for 2 s |
 
 ## Docs
 

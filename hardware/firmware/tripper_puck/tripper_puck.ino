@@ -10,8 +10,8 @@
 //   1 Hz    BLE status notify, baro sample, serial debug line
 //   2 Hz    OLED refresh — alternates every 5 s: GPS clock / live data
 //
-// LED (NeoPixel, D0): amber blink = no fix · green solid = fix, waiting for
-// phone · red pulse = connected & streaming · blue flash = marker.
+// Status lives on the OLED (fix dot, link state, MARK/ZEROED splashes) —
+// no separate status LED.
 // Button (D1→GND): marker — bumps a counter in the telemetry packet.
 // Button 2 (D2→GND): click = hold/release the screen cycle (thin border =
 // held) · long-hold = zero roll/pitch/yaw at the mounted orientation —
@@ -26,13 +26,11 @@
 #include <Adafruit_BMP280.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <Adafruit_NeoPixel.h>
 #include <TinyGPSPlus.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 
 // ---------- pins & constants ----------
-#define PIN_LED      D0
 #define PIN_BUTTON   D1
 #define PIN_BUTTON2  D2        // screen hold / attitude zero
 #define TZ_HOURS     3         // display offset for the clock screen (TRT, no DST)
@@ -83,7 +81,6 @@ static_assert(sizeof(StatusPacket) == 14, "status packet size drifted");
 Adafruit_BNO055   bno = Adafruit_BNO055(55, 0x28, &Wire);
 Adafruit_BMP280   bmp(&Wire);
 Adafruit_SSD1306  oled(128, 32, &Wire, -1);
-Adafruit_NeoPixel led(1, PIN_LED, NEO_GRB + NEO_KHZ800);
 TinyGPSPlus       gps;
 TinyGPSCustom     gsvGP(gps, "GPGSV", 3), gsvGL(gps, "GLGSV", 3), gsvGB(gps, "GBGSV", 3);
 
@@ -98,8 +95,8 @@ float maxG_g = 0;                       // latched between telemetry packets
 imu::Quaternion lastQuat;
 imu::Vector<3> lastLin;
 float lastPressPa = 0, lastTempC = 0, lastBaroAlt = 0;
-uint32_t markerFlashUntil = 0, identifyUntil = 0, splashUntil = 0;
-uint32_t tImu = 0, tTele = 0, tStatus = 0, tOled = 0, tLed = 0;
+uint32_t identifyUntil = 0, splashUntil = 0;
+uint32_t tImu = 0, tTele = 0, tStatus = 0, tOled = 0;
 uint32_t btnLastEdge = 0;
 bool btnWasDown = false;
 
@@ -108,7 +105,7 @@ Preferences prefs;
 imu::Quaternion qRef;                   // mount reference; identity until zeroed
 bool screenHold = false;
 int  heldScreen = 0;
-uint32_t zeroSplashUntil = 0, zeroFlashUntil = 0;
+uint32_t zeroSplashUntil = 0;
 uint32_t btn2DownAt = 0, btn2LastEdge = 0;
 bool btn2WasDown = false, zeroFired = false;
 
@@ -197,7 +194,6 @@ class CtrlCB : public NimBLECharacteristicCallbacks {
     if (v.size() < 1) return;
     switch (v.data()[0]) {
       case 0x01:                                                         // phone marker ack
-        markerFlashUntil = millis() + 300;
         splashUntil = millis() + 800;
         tOled = 0;
         break;
@@ -216,31 +212,6 @@ int satsInView() {
 }
 
 bool fixValid() { return gps.location.isValid() && gps.location.age() < 2000; }
-
-void setLed(uint8_t r, uint8_t g, uint8_t b) {
-  led.setPixelColor(0, led.Color(r, g, b));
-  led.show();
-}
-
-void updateLed(uint32_t now) {
-  if (now < identifyUntil) {            // identify: fast hue spin
-    uint8_t ph = (now / 40) % 3;
-    setLed(ph == 0 ? 60 : 0, ph == 1 ? 60 : 0, ph == 2 ? 60 : 0);
-    return;
-  }
-  if (now < zeroFlashUntil) { setLed(0, 90, 0); return; }
-  if (now < markerFlashUntil) { setLed(0, 0, 80); return; }
-  bool connected = bleServer && bleServer->getConnectedCount() > 0;
-  if (!fixValid()) {                    // amber blink
-    setLed((now / 500) % 2 ? 40 : 0, (now / 500) % 2 ? 20 : 0, 0);
-  } else if (!connected) {              // green solid
-    setLed(0, 35, 0);
-  } else {                              // red breathing pulse
-    float ph = (now % 2000) / 2000.0f * 2 * PI;
-    uint8_t v = (uint8_t)(22 + 18 * sinf(ph));
-    setLed(v, 0, 0);
-  }
-}
 
 // --- tiny glyphs ---
 void drawBtRune(int x, int y) {         // 7x9 bluetooth rune
@@ -364,9 +335,6 @@ void setup() {
   delay(1500);
   Serial.println("\n=== Tripper Puck firmware (e-bike/BLE) ===");
 
-  led.begin();
-  led.setBrightness(60);
-  setLed(10, 10, 10);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_BUTTON2, INPUT_PULLUP);
 
@@ -433,7 +401,6 @@ void loop() {
     btnWasDown = down;
     if (down) {
       markerCount++;
-      markerFlashUntil = now + 300;
       splashUntil = now + 800;
       tOled = 0;                        // redraw immediately with the splash
       Serial.printf("[marker] #%d\n", markerCount);
@@ -453,7 +420,6 @@ void loop() {
     qRef = lastQuat;                    // this orientation is the new zero
     saveQRef();
     zeroSplashUntil = now + 1500;
-    zeroFlashUntil = now + 700;
     tOled = 0;
     Serial.println("[zero] mount reference captured & saved");
   }
@@ -541,11 +507,5 @@ void loop() {
   if (oledOk && now - tOled >= 500) {
     tOled = now;
     refreshOled(now);
-  }
-
-  // 20 Hz LED
-  if (now - tLed >= 50) {
-    tLed = now;
-    updateLed(now);
   }
 }
