@@ -47,6 +47,49 @@ The I²C bus **must run at 100 kHz** — the BNO055's clock-stretching upsets
 ESP32 I²C at higher speeds (validated: 59,722 reads / 0 errors / 10 min).
 The firmware bursts OLED frames at 400 kHz between sensor transactions.
 
+### Cable connection diagram
+
+Pin columns match the physical XIAO ESP32-S3 viewed from above, USB-C at
+the top:
+
+```
+                      e-bike USB outlet / power bank
+                                  │
+                                  │ USB-C
+                      ┌───────────┴───────────┐
+ NeoPixel DIN ────────┤ D0                 5V ├─ n/c
+ Marker button ○──────┤ D1                GND ├────────● GND rail
+ Hold/Zero button ○───┤ D2                3V3 ├────────● 3V3 rail
+ n/c ─────────────────┤ D3                D10 ├─ n/c
+ SDA bus ●────────────┤ D4                 D9 ├─ n/c
+ SCL bus ●────────────┤ D5                 D8 ├─ n/c
+ to GPS RX ◄──────────┤ D6 (TX)       (RX) D7 ├──────◄ from GPS TX
+                      └───────────────────────┘
+                            XIAO ESP32-S3
+
+ ● 3V3 rail ─┬─ Gravity 10DOF VCC (red)     ● SDA bus (D4) ─┬─ Gravity SDA (blue)
+             ├─ GPS VCC                                     └─ OLED SDA
+             └─ OLED VCC
+                                            ● SCL bus (D5) ─┬─ Gravity SCL (green)
+ ● GND rail ─┬─ Gravity 10DOF GND (black)                   └─ OLED SCK
+             ├─ GPS GND
+             ├─ OLED GND
+             ├─ Marker button ○ (2nd leg)
+             └─ Hold/Zero button ○ (2nd leg)
+```
+
+Wiring notes:
+
+- **GPS UART is a crossover** — XIAO TX (D6) feeds the GPS **RX** pin and
+  vice versa. If the firmware reports "no NMEA data", these two are swapped.
+- **Buttons need no resistors** — each connects its pin straight to GND;
+  the firmware enables the ESP32's internal pull-ups.
+- **The Gravity board's I²C comes from its 4-pin socket** (its back-side
+  pad row is control pins only — no SDA/SCL there). Trim the cable to
+  length and glue-lock the connector for vibration.
+- **GPS patch antenna**: sky-facing, ≥ 15 mm from the XIAO and USB cable —
+  the ESP32's RF noise measurably delays fixes.
+
 ## Firmware
 
 Arduino sketches in [`hardware/firmware/`](hardware/firmware/):
