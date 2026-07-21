@@ -160,24 +160,83 @@ bool nmeaAlive(uint32_t windowMs) {
   return false;
 }
 
+// Drop bytes buffered at the previous baud — a probe right after a baud
+// switch can otherwise "pass" on stale NMEA.
+void gpsFlushRx() {
+  delay(50);
+  while (Serial1.available()) Serial1.read();
+}
+
+// 1 = ACK, 0 = NAK, -1 = timeout
+int waitAck(uint8_t cls, uint8_t id, uint32_t timeoutMs = 1500) {
+  uint32_t t0 = millis();
+  int st = 0; uint8_t ackId = 0, p0 = 0;
+  while (millis() - t0 < timeoutMs) {
+    if (!Serial1.available()) continue;
+    uint8_t b = Serial1.read();
+    switch (st) {
+      case 0: st = (b == 0xB5) ? 1 : 0; break;
+      case 1: st = (b == 0x62) ? 2 : 0; break;
+      case 2: st = (b == 0x05) ? 3 : (b == 0xB5 ? 1 : 0); break;
+      case 3: if (b == 0x01 || b == 0x00) { ackId = b; st = 4; } else st = 0; break;
+      case 4: st = (b == 0x02) ? 5 : 0; break;
+      case 5: st = (b == 0x00) ? 6 : 0; break;
+      case 6: p0 = b; st = 7; break;
+      case 7:
+        if (p0 == cls && b == id) return ackId == 0x01 ? 1 : 0;
+        st = 0; break;
+    }
+  }
+  return -1;
+}
+
+bool gpsReconfigured = false;           // fallback path ran → BBR was lost
+
 bool gpsBringup() {
   Serial1.setRxBufferSize(2048);        // survive OLED/BLE stalls at 115200
   Serial1.begin(115200, SERIAL_8N1, D7, D6);
+  gpsFlushRx();
   if (nmeaAlive(1200)) return true;     // already configured (BBR intact)
-  Serial1.end();
-  Serial1.begin(9600, SERIAL_8N1, D7, D6);
+
+  // BBR lost (dead backup cell + power cycle): module is back at 9600/1 Hz
+  // factory defaults. Confirm it's alive at 9600 BEFORE sending config, wait
+  // for the ACK, and retry — a blind one-shot send demonstrably fails here.
   const uint8_t rate[6] = {0xC8, 0x00, 0x01, 0x00, 0x01, 0x00};
-  sendUBX(0x06, 0x08, rate, 6);
-  delay(150);
   const uint8_t prt[20] = {0x01, 0x00, 0x00, 0x00, 0xD0, 0x08, 0x00, 0x00,
                            0x00, 0xC2, 0x01, 0x00, 0x07, 0x00, 0x03, 0x00,
                            0x00, 0x00, 0x00, 0x00};
-  sendUBX(0x06, 0x00, prt, 20);
-  Serial1.flush();
-  delay(250);
-  Serial1.end();
-  Serial1.begin(115200, SERIAL_8N1, D7, D6);
-  return nmeaAlive(1500);
+  for (int attempt = 0; attempt < 3; attempt++) {
+    Serial1.updateBaudRate(9600);
+    gpsFlushRx();
+    if (!nmeaAlive(1500)) continue;     // not talking yet (still booting?)
+    gpsReconfigured = true;
+    // Only the baud switch happens on the flaky 9600 link (its ACK would
+    // straddle the switch anyway); everything else runs at 115200 where
+    // ACKs are reliable.
+    sendUBX(0x06, 0x00, prt, 20);
+    Serial1.flush();
+    delay(200);
+    Serial1.updateBaudRate(115200);
+    gpsFlushRx();
+    if (!nmeaAlive(1500)) continue;     // switch didn't take — retry from 9600
+    int ack = -1;
+    for (int r = 0; r < 3 && ack != 1; r++) {
+      sendUBX(0x06, 0x08, rate, 6);
+      ack = waitAck(0x06, 0x08);
+    }
+    Serial.printf("[gps] CFG-RATE 5Hz: %s\n",
+                  ack == 1 ? "ACK" : "NO ACK — rate may still be 1 Hz");
+    // Re-save to BBR/flash: with a healthy backup cell the next power-up
+    // then takes the fast path — so the "BBR lost" warning only ever
+    // fires when the cell genuinely failed to hold.
+    const uint8_t save[13] = {0, 0, 0, 0, 0xFF, 0xFF, 0x00, 0x00, 0, 0, 0, 0, 0x03};
+    sendUBX(0x06, 0x09, save, 13);
+    int sa = waitAck(0x06, 0x09);
+    Serial.printf("[gps] CFG-CFG save to BBR: %s\n",
+                  sa == 1 ? "ACK" : sa == 0 ? "NAK" : "timeout");
+    return true;
+  }
+  return false;
 }
 
 // ---------- BLE callbacks ----------
@@ -357,7 +416,8 @@ void setup() {
                 imuOk ? "ok" : "FAIL", bmpOk ? "ok" : "FAIL", oledOk ? "ok" : "FAIL");
 
   bool gpsOk = gpsBringup();
-  Serial.printf("GPS %s (115200/5Hz)\n", gpsOk ? "ok" : "NOT RESPONDING");
+  Serial.printf("GPS %s (115200/5Hz)%s\n", gpsOk ? "ok" : "NOT RESPONDING",
+                gpsReconfigured ? " — was at 9600 factory: BBR lost, check backup cell" : "");
 
   NimBLEDevice::init("Tripper-DL1");
   bleServer = NimBLEDevice::createServer();

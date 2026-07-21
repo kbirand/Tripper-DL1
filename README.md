@@ -87,6 +87,12 @@ Wiring notes:
   length and glue-lock the connector for vibration.
 - **GPS patch antenna**: sky-facing, ≥ 15 mm from the XIAO and USB cable —
   the ESP32's RF noise measurably delays fixes.
+- **GPS backup cell** (MS621 on the GY carrier): if it's flat, every power
+  cycle factory-resets the module to 9600/1 Hz *and* forces a cold start
+  (minutes to first fix instead of seconds). The firmware detects the revert
+  and reconfigures automatically — boot log says `was at 9600 factory: BBR
+  lost, check backup cell` — but only a healthy cell brings back hot starts.
+  The cell trickle-charges while powered; if it never holds, replace it.
 
 ## Firmware
 
@@ -98,6 +104,7 @@ Arduino sketches in [`hardware/firmware/`](hardware/firmware/):
 | [`i2c_gate`](hardware/firmware/i2c_gate/) | BNO055 clock-stretch stress test (the go/no-go gate) |
 | [`i2c_diag`](hardware/firmware/i2c_diag/) | Wiring diagnostic — line states + normal/swapped bus scans |
 | [`gps_config_5hz`](hardware/firmware/gps_config_5hz/) | One-time GPS config: 5 Hz + 115200, saved to BBR (production firmware re-applies at boot) |
+| [`gps_revert_factory`](hardware/firmware/gps_revert_factory/) | Test harness — reverts the GPS to 9600/1 Hz factory defaults (simulates a power cycle with a dead backup cell) to exercise `gpsBringup()`'s recovery path |
 
 ### Build & flash
 
