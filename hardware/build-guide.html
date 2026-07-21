@@ -1,0 +1,590 @@
+<meta charset="utf-8">
+<title>Tripper Puck — Build Guide</title>
+<style>
+  :root {
+    --bg: #f7f9fc;
+    --surface: #ffffff;
+    --surface-2: #eef2f8;
+    --ink: #17212e;
+    --ink-2: #5b6878;
+    --line: #dde4ee;
+    --accent: #2f6df6;
+    --accent-ink: #1d4fc4;
+    --marker: #e8821e;
+    --ok: #2e9e57;
+    --warn: #c9a227;
+    --danger: #d1453b;
+    --code-bg: #eef2f8;
+    --shadow: 0 1px 2px rgba(23,33,46,.05), 0 8px 24px -12px rgba(23,33,46,.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f141b;
+      --surface: #161d27;
+      --surface-2: #1d2632;
+      --ink: #e7edf5;
+      --ink-2: #93a1b3;
+      --line: #2a3543;
+      --accent: #5a90ff;
+      --accent-ink: #82aaff;
+      --marker: #f0993f;
+      --ok: #4cc077;
+      --warn: #d9b64a;
+      --danger: #e06359;
+      --code-bg: #1d2632;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f141b; --surface: #161d27; --surface-2: #1d2632; --ink: #e7edf5;
+    --ink-2: #93a1b3; --line: #2a3543; --accent: #5a90ff; --accent-ink: #82aaff;
+    --marker: #f0993f; --ok: #4cc077; --warn: #d9b64a; --danger: #e06359;
+    --code-bg: #1d2632; --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.5);
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f9fc; --surface: #ffffff; --surface-2: #eef2f8; --ink: #17212e;
+    --ink-2: #5b6878; --line: #dde4ee; --accent: #2f6df6; --accent-ink: #1d4fc4;
+    --marker: #e8821e; --ok: #2e9e57; --warn: #c9a227; --danger: #d1453b;
+    --code-bg: #eef2f8; --shadow: 0 1px 2px rgba(23,33,46,.05), 0 8px 24px -12px rgba(23,33,46,.12);
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* The page owns its scrolling: a full-height container that wheel events
+     always target, independent of how the host embeds the document. */
+  .scroller {
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 48px 20px 96px; }
+
+  h1, h2, h3 { font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif; text-wrap: balance; }
+  h1 { font-size: 2.1rem; line-height: 1.15; margin: 10px 0 8px; letter-spacing: -.01em; }
+  h2 { font-size: 1.35rem; margin: 0 0 4px; }
+  h3 { font-size: 1.02rem; margin: 22px 0 8px; }
+  p { margin: 10px 0; max-width: 68ch; }
+  a { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  code, .mono {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: .86em;
+    background: var(--code-bg);
+    border-radius: 5px;
+    padding: .1em .38em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-size: .82rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; font-size: 1em; }
+
+  .eyebrow {
+    font-size: .72rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent-ink);
+  }
+  .dek { color: var(--ink-2); font-size: 1.06rem; max-width: 60ch; }
+
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 0; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
+    padding: 5px 13px; font-size: .82rem; font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .chip b { color: var(--accent-ink); }
+
+  section { margin-top: 56px; }
+  .sec-head { border-bottom: 2px solid var(--line); padding-bottom: 10px; margin-bottom: 18px; }
+  .sec-head p { color: var(--ink-2); margin: 4px 0 0; }
+
+  table {
+    width: 100%; border-collapse: collapse; font-size: .88rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .tablewrap {
+    overflow-x: auto; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--surface); box-shadow: var(--shadow); margin: 14px 0;
+  }
+  th {
+    text-align: left; font-size: .7rem; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--ink-2); padding: 10px 14px; border-bottom: 1px solid var(--line);
+    background: var(--surface-2); white-space: nowrap;
+  }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td.num { text-align: right; white-space: nowrap; }
+  tfoot td { background: var(--surface-2); font-weight: 700; }
+
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin: 16px 0; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; box-shadow: var(--shadow);
+  }
+  .card .k { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-2); font-weight: 700; }
+  .card .v { font-size: 1.25rem; font-weight: 700; font-family: ui-rounded, system-ui, sans-serif; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .card .s { font-size: .78rem; color: var(--ink-2); margin-top: 2px; }
+
+  .note {
+    border-left: 3px solid var(--accent); background: var(--surface);
+    border-radius: 0 10px 10px 0; padding: 10px 16px; margin: 16px 0; font-size: .92rem;
+    box-shadow: var(--shadow);
+  }
+  .note.marker { border-left-color: var(--marker); }
+  .note.warn { border-left-color: var(--warn); }
+  .note b:first-child { display: block; margin-bottom: 2px; }
+
+  ol.steps { counter-reset: step; list-style: none; padding: 0; margin: 18px 0; }
+  ol.steps > li {
+    counter-increment: step; position: relative; padding: 0 0 26px 52px;
+  }
+  ol.steps > li::before {
+    content: counter(step);
+    position: absolute; left: 0; top: 0;
+    width: 34px; height: 34px; border-radius: 50%;
+    background: var(--accent); color: #fff;
+    font: 700 .95rem/34px ui-rounded, system-ui, sans-serif; text-align: center;
+  }
+  ol.steps > li::after {
+    content: ""; position: absolute; left: 16.5px; top: 40px; bottom: 6px;
+    width: 1.5px; background: var(--line);
+  }
+  ol.steps > li:last-child::after { display: none; }
+  ol.steps h3 { margin: 4px 0 6px; }
+  ol.steps p, ol.steps ul { font-size: .93rem; color: var(--ink); }
+  ol.steps ul { margin: 6px 0; padding-left: 18px; }
+  ol.steps li li { margin: 3px 0; }
+
+  .led { display: inline-flex; align-items: center; gap: 8px; font-size: .88rem; font-weight: 600; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; flex: none; box-shadow: 0 0 6px currentColor; }
+
+  ul.check { list-style: none; padding: 0; margin: 12px 0; }
+  ul.check li { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: .93rem; }
+  ul.check li:last-child { border-bottom: none; }
+  ul.check input { accent-color: var(--accent); transform: translateY(2px); flex: none; }
+
+  .pill { display: inline-block; font-size: .7rem; font-weight: 700; letter-spacing: .05em; padding: 2px 9px; border-radius: 999px; text-transform: uppercase; }
+  .pill.core { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-ink); }
+  .pill.upg { background: color-mix(in srgb, var(--marker) 16%, transparent); color: var(--marker); }
+  .pill.got { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+  tr.got td { background: color-mix(in srgb, var(--ok) 5%, transparent); }
+  tr.got td:first-child::after { content: " \2713"; color: var(--ok); font-weight: 700; }
+  .got-note { display: block; font-size: .74rem; color: var(--ok); font-weight: 600; margin-top: 2px; }
+
+  footer { margin-top: 70px; border-top: 1px solid var(--line); padding-top: 18px; color: var(--ink-2); font-size: .85rem; }
+  @media (prefers-reduced-motion: no-preference) {
+    a { transition: color .15s ease; }
+  }
+</style>
+
+<div class="scroller">
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Tripper Hardware · v1 Field Guide</div>
+    <h1>Tripper Puck</h1>
+    <p class="dek">A matchbox-sized GPS + IMU + barometer ride logger that records to microSD, marks moments with one button, and charges over USB-C. Headless by design — <b>the Tripper app is its screen</b>.</p>
+    <div class="meta">
+      <span class="chip">Budget <b>≈ ₺2.700 core</b></span>
+      <span class="chip">Size <b>≈ 55 × 40 × 22 mm</b></span>
+      <span class="chip">Runtime <b>20+ h / charge</b></span>
+      <span class="chip">Build time <b>1 weekend</b></span>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <section>
+    <div class="sec-head">
+      <h2>The concept</h2>
+      <p>Why this stays small: the entire physical interface is four things.</p>
+    </div>
+    <div class="grid">
+      <div class="card"><div class="k">Charging</div><div class="v">USB-C</div><div class="s">XIAO's built-in LiPo charger — no extra board</div></div>
+      <div class="card"><div class="k">Power / record</div><div class="v">Slide switch</div><div class="s">On = auto-record when moving with a GPS fix</div></div>
+      <div class="card"><div class="k">Markers</div><div class="v">One button</div><div class="s">12 mm glove-friendly top button = drop marker</div></div>
+      <div class="card"><div class="k">Status</div><div class="v">One LED</div><div class="s">NeoPixel behind the case wall — 4 states</div></div>
+    </div>
+    <p>Everything else — live dashboard, reviewing rides, naming, exporting — already exists in the Tripper app.</p>
+    <div class="note marker">
+      <b>Scope pivot — e-bike edition (2026-07-21)</b>
+      The puck now targets the e-bike: powered from the bike's USB (<b>no LiPo, no slide switch</b>) and <b>BLE-first with no microSD</b> — the phone records through the Tripper app's recorder pipeline, so the old v2 BLE link <em>is</em> the product. Consequences: LiPo + SD module go to the spares bin, pins D3/D8–D10 are free again, the auto-record state machine moves into the app, and the puck becomes a stateless sensor that boots with the bike. Marker button and NeoPixel stay (marker now goes over BLE; LED shows fix/connection state). Trade-off accepted with open eyes: <b>no BLE link = no data for that stretch</b> — the SD "black box" is gone; re-add it later if a lost ride ever hurts. Verify the bike's USB doesn't auto-cut at low load or at standstill.
+    </div>
+    <div class="note">
+      <b>Design rule</b>
+      Resist adding screens, menus, or more buttons. Every feature that needs a UI belongs in the phone app, where it's already built and glove-tested.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <div class="sec-head">
+      <h2>Shopping list — Turkey</h2>
+      <p>Prices and stock <b>verified on-site 2026-07-11</b>. Everything below is orderable domestically — no customs.</p>
+    </div>
+
+    <div class="note warn">
+      <b>Buy direct from Robotistan — not Hepsiburada</b>
+      The same Robotistan-sold 10DOF board lists at <b>₺1.906,27</b> on Hepsiburada and <b>₺1.530,69</b> on robotistan.com. Identical seller, identical box, <b>₺375 marketplace tax</b>. Check the shop's own site before every order.
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th></th><th>Part</th><th>Role</th><th>Source</th><th>≈ Price</th></tr>
+        </thead>
+        <tbody>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
+            <td><b>Seeed XIAO ESP32-S3</b><span class="got-note">SAMM order SM83985 · 2026-07-10</span></td>
+            <td>Brain · BLE 5.0 · LiPo charging built in</td>
+            <td><a href="https://market.samm.com/en/seeed-studio-xiao-esp32s3-en">SAMM</a></td>
+            <td class="num">₺400–600</td>
+          </tr>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
+            <td><b>Gravity 10DOF AHRS</b><br><span class="mono">BNO055 + BMP280</span><span class="got-note">Robotistan · 2026-07-11</span></td>
+            <td><b>On-chip sensor fusion</b> — quaternions, linear accel &amp; gravity vector straight off the chip + barometer. No fusion code to write.</td>
+            <td><a href="https://www.robotistan.com/gravity-bno055-bmp280-akilli-10dof-oryantasyon-sensoru-ahrs">Robotistan</a></td>
+            <td class="num">₺1.531</td>
+          </tr>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
+            <td><b>u-blox NEO-8M GPS</b> (GYGPSV1, patch antenna)<span class="got-note">Robotistan · 2026-07-10</span></td>
+            <td>Position · configure 5 Hz via UBX (10 Hz single-constellation)</td>
+            <td><a href="https://www.robotistan.com/ublox-gygpsv1-gps-modulu">Robotistan</a></td>
+            <td class="num">₺400–800</td>
+          </tr>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
+            <td><b>MicroSD module (SPI)</b> + 8–32 GB card<span class="got-note">2026-07-11</span></td>
+            <td>CSV storage — a year of rides fits easily</td>
+            <td>Direnc.net · Robotistan</td>
+            <td class="num">₺50–100</td>
+          </tr>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
+            <td><b>LiPo 3.7 V 1000–1200 mAh</b> (JST-PH)<span class="got-note">2026-07-11</span></td>
+            <td>20+ hours of continuous logging</td>
+            <td>Robotistan · Direnc.net</td>
+            <td class="num">₺150–300</td>
+          </tr>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
+            <td><b>Controls kit</b>: slide switch, 12 mm button, 1× WS2812/NeoPixel LED<span class="got-note">2026-07-11</span></td>
+            <td>Power · marker · status</td>
+            <td>any hobby shop</td>
+            <td class="num">₺50–100</td>
+          </tr>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
+            <td><b>Consumables</b>: silicone wire 28 AWG, heat-shrink, JST leads, 2 mm foam pad<span class="got-note">2026-07-11</span></td>
+            <td>Wiring + vibration isolation</td>
+            <td>any hobby shop</td>
+            <td class="num">₺100–150</td>
+          </tr>
+        </tbody>
+        <tfoot>
+          <tr><td colspan="4">Core total</td><td class="num">≈ ₺2.700–3.600</td></tr>
+        </tfoot>
+      </table>
+    </div>
+
+    <div class="note">
+      <b>✅ BOM complete (2026-07-11) · go/no-go gate PASSED (2026-07-21)</b>
+      Every core part is in hand, and the one test that could sink the build is done: both chips answered at 100 kHz (<span class="mono">0x28</span>/<span class="mono">0x76</span>, correct chip IDs), then <b>59,722 continuous quaternion reads over 10 minutes in IMUPLUS mode with zero errors</b> (worst-case transaction 2.58 ms). The ESP32 clock-stretch risk is retired at 100 kHz — the Gravity board is a keeper and the return window no longer matters. Test sketch: <span class="mono">hardware/firmware/i2c_gate/</span>.
+    </div>
+
+    <div class="note">
+      <b>Decision record — why not the ₺337 GY-87</b>
+      The original baseline was a <b>GY-87</b> (MPU-6050 + HMC5883L + BMP180, <a href="https://www.robotistan.com/mpu6050-hmc5883l-bmp180-10dof-sensor-karti">₺336,98</a>) — 6-axis, DMP quaternions, drifting yaw — on the theory you'd swap in a BNO085 later. <b>That upgrade path doesn't exist in Turkey</b> (see below), which turned the cheap board from a stepping stone into a dead end. The IMU decides whether this logger's data is worth having, so the ₺1.194 went to the BNO055. Not revisiting.
+    </div>
+
+    <h3>Upgrades — order in parallel, drop-in later</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th></th><th>Part</th><th>Replaces</th><th>Why</th><th>≈ Price</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="pill upg">Upgrade</span></td>
+            <td><b>BMP388 breakout</b></td>
+            <td>BMP280</td>
+            <td>Finer altitude resolution — the elevation/grade quality jump. <b>BMP390 is not carried in TR</b>; BMP388 is the closest Bosch part. <a href="https://www.robotistan.com/bmp388-dijital-basinc-sensoru-breakout">Robotistan</a>, in stock. Marginal over BMP280 — do this last, if ever.</td>
+            <td class="num">₺411</td>
+          </tr>
+          <tr>
+            <td><span class="pill upg">Upgrade</span></td>
+            <td><b>u-blox M10 / NEO-M9N GPS</b></td>
+            <td>NEO-M8N</td>
+            <td>True 10–25 Hz multi-constellation — best single data-quality upgrade</td>
+            <td class="num">$20–30</td>
+          </tr>
+          <tr>
+            <td><span class="pill upg">Upgrade</span></td>
+            <td><b>BLE camera shutter remote</b></td>
+            <td>—</td>
+            <td>Handlebar marker button with zero wiring (pairs as BLE keyboard)</td>
+            <td class="num">₺100</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note warn">
+      <b>Dead end — don't re-add the BNO085 (checked 2026-07-11)</b>
+      The BNO085/BNO080 is the better sensor (better vibration rejection, 400 Hz fusion) and this guide used to list it as the upgrade. <b>No Turkish retailer carries it</b> — absent from Robotistan's, Direnc's and SAMM's product sitemaps entirely. Importing is worse than the sticker price suggests: Turkey's de-minimis is <b>€30</b> with <b>60% duty</b> on non-EU goods, and anything <em>over</em> €30 leaves the simplified regime and needs a customs broker. A $24.95 <a href="https://www.adafruit.com/product/4754">Adafruit BNO085</a> lands on the wrong side of that line.<br><br>
+      Also gone: every other 9-axis fallback (MPU-9250, MPU-9255, ICM-20948) is <b>out of stock</b> at both Robotistan and Direnc, the Turkish-made <a href="https://www.robotistan.com/boardoza-bno055-imu-sensor-modulu">Boardoza BNO055</a> (₺989,81 — the cheap bare-BNO055 play) is <b>out of stock</b>, and Adafruit's BNO055 at Direnc is ₺2.954,98 and <b>out of stock</b>. The Gravity board is the <em>only</em> BNO055 you can actually buy in Turkey right now — which is what justifies its price, not the DFRobot label.
+    </div>
+
+    <h3>Tools you need</h3>
+    <ul class="check">
+      <li><input type="checkbox"> Soldering iron (temperature-controlled, fine tip) + solder + flux</li>
+      <li><input type="checkbox"> Side cutters, tweezers, wire stripper</li>
+      <li><input type="checkbox"> Multimeter (continuity checks before first power-up)</li>
+      <li><input type="checkbox"> USB-C data cable + computer with Arduino IDE</li>
+      <li><input type="checkbox"> Access to a 3D printer for the enclosure (or a small project box + hobby knife)</li>
+    </ul>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <div class="sec-head">
+      <h2>Wiring map</h2>
+      <p>Everything is 3.3 V logic — no level shifters. Three buses, two GPIOs, done.</p>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>XIAO pin</th><th>GPIO</th><th>Connects to</th><th>Bus / signal</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">D4</td><td class="mono">GPIO5</td><td>10DOF <span class="mono">SDA</span> (Gravity blue) + OLED <span class="mono">SDA</span></td><td>I²C data — BNO055 <span class="mono">0x28</span> + BMP280 <span class="mono">0x76</span> + SSD1306 <span class="mono">0x3C</span></td></tr>
+          <tr><td class="mono">D5</td><td class="mono">GPIO6</td><td>10DOF <span class="mono">SCL</span> (Gravity green) + OLED <span class="mono">SCK</span></td><td>I²C clock — <b>run at 100 kHz</b>, see below (400 kHz burst for OLED frames only)</td></tr>
+          <tr><td class="mono">D6 (TX)</td><td class="mono">GPIO43</td><td>GPS <span class="mono">RX</span></td><td>UART 9600→115200 baud</td></tr>
+          <tr><td class="mono">D7 (RX)</td><td class="mono">GPIO44</td><td>GPS <span class="mono">TX</span></td><td>UART (NMEA / UBX in)</td></tr>
+          <tr><td class="mono">D1</td><td class="mono">GPIO2</td><td>Marker button → GND</td><td>Input, internal pull-up — 12 mm glove button in the final case</td></tr>
+          <tr><td class="mono">D2</td><td class="mono">GPIO3</td><td>Hold/zero button → GND (HW-483)</td><td>Click = pin screen · long-hold = zero attitude (saved to NVS)</td></tr>
+          <tr><td class="mono">D0</td><td class="mono">GPIO1</td><td>NeoPixel <span class="mono">DIN</span></td><td>Status LED</td></tr>
+          <tr><td class="mono">D3, D8–D10</td><td class="mono">—</td><td><em>free</em> (former SD pins)</td><td>e-bike edition: no SD</td></tr>
+          <tr><td class="mono">USB-C</td><td>—</td><td>E-bike USB outlet / power bank</td><td>Power — no battery; the puck boots with the bike</td></tr>
+          <tr><td class="mono">3V3 / GND</td><td>—</td><td>All module VCC / GND</td><td>Power rails</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note warn">
+      <b>The BNO055 + ESP32 I²C clock-stretch problem — read before you solder</b>
+      The BNO055 stretches the I²C clock in a way ESP32 I²C peripherals handle badly. It's the single most-reported gotcha with this chip. The usual escape is to run the BNO055 over <b>UART</b> instead. The <a href="https://wiki.dfrobot.com/sen0253/">Gravity connector is VCC/GND/SDA/SCL, I²C only</a> — but <b>correction (2026-07-21, verified on the physical V1.0 board):</b> the back-side pad row <em>does</em> break out <span class="mono">PS1</span>/<span class="mono">PS2</span> (plus NBOOT/RST/INT/I2C_ADDR/BL_IND — no SDA/SCL pads), so a UART fallback technically exists via the PS pads. It would strand the I²C-only BMP280 on a separate bus, and the clean 10-minute hammer test made it moot — noted here in case a future revision ever needs it.<br><br>
+      Mitigations, in order: drop the bus to <b>100 kHz</b> (<span class="mono">Wire.setClock(100000)</span>), raise the I²C timeout (<span class="mono">Wire.setTimeOut()</span>), keep SDA/SCL runs short with 4.7 kΩ pull-ups. This is workable — but <b>prove it on the breadboard before the case is glued</b> (build step 2).
+    </div>
+    <div class="note">
+      <b>Run it 6-axis (IMU mode), not 9-axis (NDOF)</b>
+      NDOF mode needs a calibrated magnetometer. On a motorcycle — steel frame, alternator, speaker magnets — that calibration is junk and yaw will wander. You don't need it: <b>Tripper takes heading from GPS</b>, and the reference-quaternion math makes absolute yaw irrelevant. <span class="mono">OPERATION_MODE_IMUPLUS</span> sidesteps the BNO055's worst weakness. The magnetometer is the one part of this board you paid for and won't use.
+    </div>
+    <div class="note warn">
+      <b>Antenna rule (this decides your GPS quality)</b>
+      Mount the GPS patch antenna at the top of the enclosure, facing the sky, at least 15 mm away from the ESP32 module — its RF noise degrades GPS reception. If the module has a u.fl connector, route the antenna to the lid.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <div class="sec-head">
+      <h2>Build sequence</h2>
+      <p>Bench-verify every module <em>before</em> final soldering — debugging inside a stacked sandwich is misery.</p>
+    </div>
+    <ol class="steps">
+      <li>
+        <h3>Flash-test the XIAO</h3>
+        <p>Arduino IDE → add ESP32 boards (Boards Manager URL: <span class="mono">espressif/arduino-esp32</span>), select <b>XIAO_ESP32S3</b>. Upload Blink. Confirm the serial monitor works at 115200.</p>
+      </li>
+      <li>
+        <h3>Breadboard the I²C sensors — <em>this is the go/no-go gate</em></h3>
+        <p>Wire the 10DOF board, run an I²C scanner at <b>100 kHz</b>. Expect <span class="mono">0x28</span> (BNO055) and <span class="mono">0x76</span> (BMP280). Then hammer the bus: read the BNO055 continuously for <b>10 minutes straight</b> and confirm zero dropped/hung transactions.</p>
+        <p><b>Do not proceed until this is clean.</b> The clock-stretch issue above has no UART fallback on this board — if the bus won't hold steady on a breadboard, it will not hold on a vibrating handlebar, and you need to know that now, not after the case is glued.</p>
+        <p><b>✅ Passed 2026-07-21</b> — 59,722 reads / 0 errors / 10 min @ 100 kHz, IMUPLUS active, max transaction 2.58 ms. Sketch: <span class="mono">firmware/i2c_gate/</span>.</p>
+      </li>
+      <li>
+        <h3>Prove the fusion output</h3>
+        <p>Adafruit BNO055 library → set <span class="mono">OPERATION_MODE_IMUPLUS</span> (6-axis) and read <span class="mono">getQuat()</span>. You should see live quaternions with no calibration dance. This is the moment the project becomes real: those quaternions feed the same reference-frame math as the Tripper app — and unlike the MPU-6050's DMP, you didn't have to fight for them.</p>
+        <p><b>✅ Passed 2026-07-21</b> — library path up in IMUPLUS, live quaternions + linear accel on the breadboard (test sketch since folded into <span class="mono">firmware/tripper_puck/</span>). Bonus: MON-VER unmasked the "NEO-M8Z" GPS as genuine u-blox 8 silicon (ROM 3.01, SPG 3.01, PROTVER 18, GPS/GLO/BDS/QZSS).</p>
+      </li>
+      <li>
+        <h3>Get a GPS fix</h3>
+        <p>Wire GPS to UART, run a TinyGPS++ example <b>near a window or outside</b> — first cold fix can take 1–5 min. Then send the UBX commands to raise the rate to 5–10 Hz and baud to 115200 (one-time config, saved to the module's flash/battery-backed RAM).</p>
+        <p><b>✅ Fix acquired 2026-07-21</b> — NMEA + TinyGPS++ verified, MON-VER confirms genuine u-blox 8 (ROM 3.01, PROTVER 18, GPS/GLO/BDS/QZSS). Config applied &amp; verified same day (<span class="mono">firmware/gps_config_5hz/</span>): CFG-RATE 200 ms ACKed, read-back confirmed, saved to BBR, measured 5.0 GGA/s at 115200. Production firmware re-applies at every boot in case the backup battery ever drains. Bench extra that got promoted: 0.91" SSD1306 OLED at <span class="mono">0x3C</span> on the shared I²C bus — now integral to <span class="mono">firmware/tripper_puck/</span> (clock/data screens, hold toggle, zero progress UI).</p>
+      </li>
+      <li>
+        <h3>Log to SD</h3>
+        <p>SdFat example → create <span class="mono">/rides/2026-07-12_1030.csv</span>, write rows, power-cycle mid-write and confirm the file survives (write header + flush every second).</p>
+      </li>
+      <li>
+        <h3>Integrate the firmware</h3>
+        <p>Combine into the main sketch (architecture below). Bench-test auto-record by shaking + walking outside.</p>
+        <p><b>✅ e-bike edition firmware running (2026-07-21)</b> — <span class="mono">firmware/tripper_puck/</span>: BLE service (telemetry 5 Hz / status 1 Hz / control), designed OLED screens alternating clock/data with hold toggle, marker button, 10 s mount-zero (reference quaternion, persisted to NVS, applied to display <em>and</em> telemetry), GPS autoconfig at boot. Phone-verified with LightBlue: connect, notify stream, control writes all working.</p>
+      </li>
+      <li>
+        <h3>Solder the stack</h3>
+        <ul>
+          <li>Shorten all wires to final lengths; silicone wire tolerates vibration best.</li>
+          <li>Battery + slide switch inline on BAT+, heat-shrink everything.</li>
+          <li>Button in the lid, NeoPixel glued behind a 2 mm wall (it shines through).</li>
+        </ul>
+      </li>
+      <li>
+        <h3>Enclosure &amp; mounting</h3>
+        <ul>
+          <li>Print a two-part case ≈ 55 × 40 × 22 mm; cutouts: USB-C, switch, button. Search "XIAO ESP32S3 GPS logger case" on Printables for starting points.</li>
+          <li>Sensor board sits on the 2 mm foam pad — isolates handlebar buzz from the accelerometer.</li>
+          <li>GPS antenna under a 1.5 mm lid section (plastic is RF-transparent), ESP32 at the opposite end.</li>
+          <li>Mount the case <b>rigidly</b> to the bar (the foam is inside, not outside) — same rule as the phone.</li>
+        </ul>
+      </li>
+      <li>
+        <h3>Field-verify against Tripper</h3>
+        <p>Ride with the puck and the phone app recording simultaneously. Distances should agree within a few percent; the puck's 5–10 Hz track should look <em>smoother</em> in corners. Import the CSV and compare charts.</p>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <div class="sec-head">
+      <h2>Firmware architecture</h2>
+      <p>Arduino (C++). One loop, three rates, no RTOS needed.</p>
+    </div>
+
+    <h3>Libraries</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Library</th><th>For</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Adafruit BNO055 + Adafruit Unified Sensor</td><td>Quaternions, linear accel &amp; gravity vector at 100 Hz — fusion runs on the chip</td></tr>
+          <tr><td class="mono">TinyGPSPlus</td><td>NMEA parsing (lat/lon/alt/speed/course/hdop/time)</td></tr>
+          <tr><td class="mono">Adafruit BMP280</td><td>BMP280 pressure → altitude</td></tr>
+          <tr><td class="mono">SdFat</td><td>Fast, reliable FAT32 logging</td></tr>
+          <tr><td class="mono">Adafruit NeoPixel</td><td>Status LED</td></tr>
+          <tr><td class="mono">NimBLE-Arduino <i>(v2)</i></td><td>BLE link to the Tripper app</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Main loop (three rates)</h3>
+<pre><code>100 Hz  IMU: read BNO055 quaternion (fusion already done on-chip)
+        → reference-frame math
+        (same as Tripper: slope = asin(fwd_world.z), g = dot products)
+        latch interval max-g
+
+ 5–10 Hz GPS: parse UART continuously; on each fix update
+        position, speed, course; accumulate distance with the
+        3 m anchor rule (skip jitter while stopped)
+
+ 5 Hz   LOG: assemble one CSV row from latest values,
+        write to SD, flush once per second
+
+ 1 Hz   HOUSEKEEPING: auto-record state machine, LED state,
+        battery voltage read, baro sample (25 Hz internally, averaged)</code></pre>
+
+    <h3>Auto-record state machine</h3>
+<pre><code>IDLE       → RECORDING   when fix valid AND speed &gt; 2 m/s for 5 s
+RECORDING  → AUTO-PAUSED when speed &lt; 1 m/s for 3 min
+AUTO-PAUSED→ RECORDING   when speed &gt; 2 m/s again (new file segment? no —
+                          same file, paused time excluded like the app)
+any state  → CLOSED      on power switch off (flush + close in the
+                          brown-out grace window — flush often!)</code></pre>
+
+    <h3>Marker button</h3>
+    <p>GPIO interrupt with 50 ms debounce. Short press: write a marker event (row gets <span class="mono">sync</span> in the marker column) + blue LED flash. Long press (2 s): manual start/stop override for parking-lot testing.</p>
+
+    <h3>LED states</h3>
+    <p style="display:flex; flex-wrap:wrap; gap:18px; margin-top:10px;">
+      <span class="led"><span class="dot" style="background:var(--warn); color:var(--warn);"></span> blinking — searching for fix</span>
+      <span class="led"><span class="dot" style="background:var(--ok); color:var(--ok);"></span> solid — fix, ready</span>
+      <span class="led"><span class="dot" style="background:var(--danger); color:var(--danger);"></span> slow pulse — recording</span>
+      <span class="led"><span class="dot" style="background:var(--accent); color:var(--accent);"></span> flash — marker stamped</span>
+    </p>
+
+    <h3>CSV format — Tripper-compatible</h3>
+    <p>Use the app's exact header so files drop straight into the same analysis/video-overlay workflow:</p>
+<pre><code>timestamp,elapsed_s,lat,lon,alt_m,baro_alt_m,pressure_kpa,h_acc_m,v_acc_m,
+speed_mps,speed_kmh,heading_deg,distance_m,imu_slope_deg,imu_slope_pct,
+gps_slope_deg,gps_slope_pct,roll_deg,pitch_deg,yaw_deg,current_g,max_g,
+longitudinal_g,lateral_g,vertical_g,rot_x,rot_y,rot_z,marker</code></pre>
+    <p style="font-size:.9rem; color:var(--ink-2);">Timestamps come from GPS time (free, perfect for syncing with the phone and video). <span class="mono">h_acc_m</span> ≈ HDOP × 5 as a rough map. Fields you can't measure yet: write <span class="mono">0</span> — same as the app before a fix.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <div class="sec-head">
+      <h2>Power budget</h2>
+      <p>Why this outlasts any phone.</p>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Consumer</th><th>Typical draw</th></tr></thead>
+        <tbody>
+          <tr><td>GPS (NEO-M8N, tracking)</td><td class="num">≈ 30 mA</td></tr>
+          <tr><td>ESP32-S3 (BLE off, 80 MHz)</td><td class="num">≈ 20–30 mA</td></tr>
+          <tr><td>IMU + barometer</td><td class="num">≈ 4 mA</td></tr>
+          <tr><td>SD writes (amortized)</td><td class="num">≈ 5 mA</td></tr>
+          <tr><td>NeoPixel (dim)</td><td class="num">≈ 2 mA</td></tr>
+        </tbody>
+        <tfoot>
+          <tr><td>Total ≈ 60–70 mA → <b>1000 mAh ÷ 65 mA</b></td><td class="num">≈ 15–20 h</td></tr>
+        </tfoot>
+      </table>
+    </div>
+    <p style="font-size:.9rem; color:var(--ink-2);">Add BLE streaming (v2): +10–15 mA. Drop the CPU to 80 MHz and dim the LED — both are one-line changes worth doing.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <div class="sec-head">
+      <h2>v2 — the Bluetooth link to Tripper</h2>
+      <p>When the hardware works, the puck becomes a live sensor for the app.</p>
+    </div>
+    <p>One BLE service, three characteristics:</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Characteristic</th><th>Direction</th><th>Payload</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">telemetry</td><td>notify → phone</td><td>Packed sample @ 5–10 Hz: fix, lat, lon, alt, speed, course, quat, g, baro</td></tr>
+          <tr><td class="mono">status</td><td>notify → phone</td><td>Battery %, fix quality, record state, SD free space</td></tr>
+          <tr><td class="mono">control</td><td>write ← phone</td><td>start / stop / marker / set time</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>App side: an <span class="mono">ExternalSensorSource</span> that feeds the same recorder pipeline the phone sensors use today — the dashboard, Dynamic Island, overlays, and exports all work unchanged, just with 10 Hz GPS. The phone's Marker button then stamps markers into <em>both</em> logs.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <div class="sec-head">
+      <h2>Pitfalls — read before soldering</h2>
+    </div>
+    <ul class="check">
+      <li><input type="checkbox"> <b>GPS near ESP32:</b> keep antenna ≥ 15 mm from the module and USB cable; test fix time before gluing anything.</li>
+      <li><input type="checkbox"> <b>Fake u-blox:</b> ultra-cheap marketplace "M8N" boards are often older chips reflashed — buy from drone shops; verify with u-center over serial.</li>
+      <li><input type="checkbox"> <b>Clone compass:</b> QMC5883L at <span class="mono">0x0D</span> masquerading as HMC5883L — different library, not a defect.</li>
+      <li><input type="checkbox"> <b>SD corruption:</b> flush every second, close file on the auto-pause; never rely on clean power-down.</li>
+      <li><input type="checkbox"> <b>Vibration:</b> foam under the sensor board or your g-force column is engine buzz.</li>
+      <li><input type="checkbox"> <b>Brown-out on SD writes:</b> add a 470 µF capacitor across the SD module's supply if you see random resets.</li>
+      <li><input type="checkbox"> <b>Charging heat:</b> the XIAO's charge IC is under the board — leave the underside ventilated in the case.</li>
+      <li><input type="checkbox"> <b>Waterproofing:</b> conformal coat the boards or accept "shower-proof"; keep the USB port plugged with a rubber stopper.</li>
+    </ul>
+  </section>
+
+  <footer>
+    Tripper Puck build guide · companion hardware for the <a href="https://github.com/kbirand/Tripper">Tripper iOS app</a> · sensor math shared with <span class="mono">ReferenceFrame.swift</span>
+  </footer>
+</div>
+</div>
