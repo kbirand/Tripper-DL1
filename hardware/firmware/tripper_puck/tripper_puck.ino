@@ -97,8 +97,36 @@ imu::Vector<3> lastLin;
 float lastPressPa = 0, lastTempC = 0, lastBaroAlt = 0;
 uint32_t identifyUntil = 0, splashUntil = 0;
 uint32_t tImu = 0, tTele = 0, tStatus = 0, tOled = 0;
-uint32_t btnLastEdge = 0;
-bool btnWasDown = false;
+uint32_t loopsPerSec = 0;               // loop() iterations between debug lines
+uint32_t maxLoopGapMs = 0, lastLoopAt = 0;   // worst single-iteration stall
+
+// Buttons are captured by pin-change ISRs so presses land even while the
+// loop is stalled (I2C timeout etc.); the loop only consumes the results.
+volatile uint32_t mkEdgeAt = 0;
+volatile bool     mkDown = false;
+volatile uint8_t  mkPresses = 0;        // presses not yet consumed
+volatile uint32_t b2FallAt = 0, b2EdgeAt = 0;
+volatile bool     b2Down = false;
+volatile uint8_t  b2Clicks = 0;         // short-press releases not yet consumed
+
+void IRAM_ATTR isrMarker() {
+  uint32_t t = millis();
+  bool dn = digitalRead(PIN_BUTTON) == LOW;
+  if (dn == mkDown || t - mkEdgeAt < 50) return;   // bounce
+  mkEdgeAt = t;
+  mkDown = dn;
+  if (dn) mkPresses++;
+}
+
+void IRAM_ATTR isrBtn2() {
+  uint32_t t = millis();
+  bool dn = digitalRead(PIN_BUTTON2) == LOW;
+  if (dn == b2Down || t - b2EdgeAt < 50) return;   // bounce
+  b2EdgeAt = t;
+  b2Down = dn;
+  if (dn) b2FallAt = t;
+  else if (t - b2FallAt < CLICK_MAX_MS) b2Clicks++;
+}
 
 // screen hold + mount-zero (button 2)
 Preferences prefs;
@@ -106,8 +134,7 @@ imu::Quaternion qRef;                   // mount reference; identity until zeroe
 bool screenHold = false;
 int  heldScreen = 0;
 uint32_t zeroSplashUntil = 0;
-uint32_t btn2DownAt = 0, btn2LastEdge = 0;
-bool btn2WasDown = false, zeroFired = false;
+bool zeroFired = false;
 
 void saveQRef() {
   prefs.putFloat("qw", qRef.w()); prefs.putFloat("qx", qRef.x());
@@ -373,7 +400,7 @@ void drawZeroedSplash() {
 void refreshOled(uint32_t now) {
   oled.clearDisplay();
   oled.setTextColor(SSD1306_WHITE);
-  uint32_t heldMs = (btn2WasDown && !zeroFired) ? now - btn2DownAt : 0;
+  uint32_t heldMs = (b2Down && !zeroFired) ? now - b2FallAt : 0;
   if (heldMs > ZERO_SHOW_MS)        drawZeroProgress(heldMs);
   else if (now < zeroSplashUntil)   drawZeroedSplash();
   else if (now < splashUntil)       drawMarkerSplash();
@@ -391,11 +418,17 @@ void refreshOled(uint32_t now) {
 // ---------- setup ----------
 void setup() {
   Serial.begin(115200);
+  // Never let debug prints block the loop: with a half-open USB CDC (host
+  // opened the port but isn't draining it) each printf otherwise stalls for
+  // its timeout — seconds-long loop freezes, dead buttons, laggy OLED.
+  Serial.setTxTimeoutMs(0);
   delay(1500);
   Serial.println("\n=== Tripper Puck firmware (e-bike/BLE) ===");
 
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_BUTTON2, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), isrMarker, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON2), isrBtn2, CHANGE);
 
   prefs.begin("puck", false);           // load the mount reference, if ever zeroed
   qRef = imu::Quaternion(prefs.getFloat("qw", 1.0f), prefs.getFloat("qx", 0.0f),
@@ -420,6 +453,10 @@ void setup() {
                 gpsReconfigured ? " — was at 9600 factory: BBR lost, check backup cell" : "");
 
   NimBLEDevice::init("Tripper-DL1");
+  // Full TX power: phone logs showed supervision timeouts every few minutes
+  // at the default level. The link crosses a bike frame and a rider's body
+  // to a pocketed phone — margin matters more than the ~20 mW it costs.
+  NimBLEDevice::setPower(9);
   bleServer = NimBLEDevice::createServer();
   bleServer->setCallbacks(new SrvCB());
   bleServer->advertiseOnDisconnect(true);
@@ -461,47 +498,41 @@ void setup() {
 // ---------- main loop ----------
 void loop() {
   uint32_t now = millis();
+  loopsPerSec++;
+  if (lastLoopAt && now - lastLoopAt > maxLoopGapMs) maxLoopGapMs = now - lastLoopAt;
+  lastLoopAt = now;
 
   while (Serial1.available()) gps.encode(Serial1.read());
 
-  // marker button, 50 ms debounce
-  bool down = digitalRead(PIN_BUTTON) == LOW;
-  if (down != btnWasDown && now - btnLastEdge > 50) {
-    btnLastEdge = now;
-    btnWasDown = down;
-    if (down) {
-      markerCount++;
-      splashUntil = now + 800;
-      tOled = 0;                        // redraw immediately with the splash
-      Serial.printf("[marker] #%d\n", markerCount);
-    }
+  // buttons: edges were latched by the ISRs — just consume them here
+  if (mkPresses) {
+    noInterrupts();
+    uint8_t n = mkPresses; mkPresses = 0;
+    interrupts();
+    markerCount += n;
+    splashUntil = now + 800;
+    tOled = 0;                          // redraw immediately with the splash
+    Serial.printf("[marker] #%d\n", markerCount);
   }
-
-  // button 2: click = hold/release screen, long-hold = zero attitude
-  bool down2 = digitalRead(PIN_BUTTON2) == LOW;
-  if (down2 && !btn2WasDown && now - btn2LastEdge > 50) {
-    btn2LastEdge = now;
-    btn2WasDown = true;
-    btn2DownAt = now;
-    zeroFired = false;
+  if (b2Clicks) {
+    noInterrupts();
+    uint8_t n = b2Clicks; b2Clicks = 0;
+    interrupts();
+    if (n & 1) screenHold = !screenHold;
+    if (screenHold) heldScreen = (int)((now / 5000) % 2);
+    tOled = 0;
+    Serial.printf("[screen] %s\n", screenHold ? "held" : "cycling");
   }
-  if (down2 && btn2WasDown && !zeroFired && now - btn2DownAt >= ZERO_HOLD_MS) {
+  static bool b2Prev = false;
+  if (b2Down && !b2Prev) zeroFired = false;        // new press = fresh hold
+  b2Prev = b2Down;
+  if (b2Down && !zeroFired && now - b2FallAt >= ZERO_HOLD_MS) {
     zeroFired = true;
     qRef = lastQuat;                    // this orientation is the new zero
     saveQRef();
     zeroSplashUntil = now + 1500;
     tOled = 0;
     Serial.println("[zero] mount reference captured & saved");
-  }
-  if (!down2 && btn2WasDown && now - btn2LastEdge > 50) {
-    btn2LastEdge = now;
-    btn2WasDown = false;
-    if (!zeroFired && now - btn2DownAt < CLICK_MAX_MS) {
-      screenHold = !screenHold;
-      if (screenHold) heldScreen = (int)((now / 5000) % 2);
-      tOled = 0;
-      Serial.printf("[screen] %s\n", screenHold ? "held" : "cycling");
-    }
   }
 
   // 100 Hz IMU
@@ -568,9 +599,15 @@ void loop() {
     if (bleServer->getConnectedCount() > 0) chStat->notify();
     float dbgR, dbgP, dbgY;
     quatToEuler(qRel(), dbgR, dbgP, dbgY);
-    Serial.printf("[dbg] fix=%d sats=%d view=%d conn=%d R=%+.1f P=%+.1f qW=%.3f baro=%.1fm mark=%d\n",
+    // btn: raw pin levels (1 = idle/high, 0 = pressed/low — 0 while unpressed
+    // means the line is stuck) · lps: main-loop iterations since last line
+    // (drops from tens of thousands to single digits when something blocks)
+    Serial.printf("[dbg] fix=%d sats=%d view=%d conn=%d R=%+.1f P=%+.1f qW=%.3f baro=%.1fm mark=%d btn=%d%d lps=%lu stall=%lu\n",
                   s.fix, s.sats, satsInView(), bleServer->getConnectedCount(),
-                  dbgR, dbgP, lastQuat.w(), lastBaroAlt, markerCount);
+                  dbgR, dbgP, lastQuat.w(), lastBaroAlt, markerCount,
+                  digitalRead(PIN_BUTTON), digitalRead(PIN_BUTTON2), loopsPerSec, maxLoopGapMs);
+    loopsPerSec = 0;
+    maxLoopGapMs = 0;
   }
 
   // 2 Hz OLED
