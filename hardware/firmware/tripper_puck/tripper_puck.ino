@@ -370,11 +370,21 @@ void setup() {
       CTRL_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   ctrl->setCallbacks(new CtrlCB());
   svc->start();
+  // The 128-bit service UUID (18 B) and the name (13 B) don't both fit in the
+  // 31-byte primary advertisement, and NimBLE silently drops the UUID — which
+  // makes the puck invisible to Tripper's service-filtered scan (the only kind
+  // iOS allows in the background). UUID goes in the primary packet, name in
+  // the scan response; iOS merges the two, so scanners still show the name.
   NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
-  adv->setName("Tripper-DL1");
-  adv->addServiceUUID(SVC_UUID);
+  NimBLEAdvertisementData advData;
+  advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
+  advData.setCompleteServices(NimBLEUUID(SVC_UUID));
+  NimBLEAdvertisementData scanData;
+  scanData.setName("Tripper-DL1");
+  adv->setAdvertisementData(advData);
+  adv->setScanResponseData(scanData);
   adv->start();
-  Serial.println("[ble] advertising as Tripper-DL1");
+  Serial.println("[ble] advertising as Tripper-DL1 (UUID in adv, name in scan rsp)");
 
   if (oledOk) {
     oled.clearDisplay();
