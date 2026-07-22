@@ -17,8 +17,13 @@
 // held) · long-hold = zero roll/pitch/yaw at the mounted orientation —
 // reference quaternion saved to flash, survives reboots, and the BLE
 // telemetry quaternion is re-referenced the same way.
-// Control writes: 0x01 = marker ack flash · 0x03 = identify (LED rainbow +
-// OLED invert, for picking the right device in a scanner app).
+// Control writes: 0x01 = marker ack flash · 0x02 = zero roll/pitch/yaw (same
+// as the button 2 long-hold, triggered from the app) · 0x03 = identify (LED
+// rainbow + OLED invert, for picking the right device in a scanner app) ·
+// 0x04 + [active u8][elapsed s u32 LE] = ride state — while active the OLED
+// runs inverted and a third screen (trip time) joins the cycle. The app
+// re-sends it on every reconnect, so a link flap or puck reboot mid-ride
+// self-heals.
 
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
@@ -108,6 +113,10 @@ volatile uint8_t  mkPresses = 0;        // presses not yet consumed
 volatile uint32_t b2FallAt = 0, b2EdgeAt = 0;
 volatile bool     b2Down = false;
 volatile uint8_t  b2Clicks = 0;         // short-press releases not yet consumed
+volatile bool     bleZeroReq = false;   // 0x02 control write, consumed in loop()
+volatile bool     bleRideMsg = false;   // 0x04 control write latched below
+volatile uint8_t  bleRideActiveB = 0;
+volatile uint32_t bleRideElapsedS = 0;
 
 void IRAM_ATTR isrMarker() {
   uint32_t t = millis();
@@ -133,6 +142,8 @@ Preferences prefs;
 imu::Quaternion qRef;                   // mount reference; identity until zeroed
 bool screenHold = false;
 int  heldScreen = 0;
+bool rideActive = false;                // phone is recording: invert + trip screen
+uint32_t tripStartMs = 0;               // millis() epoch of the ride (elapsed-adjusted)
 uint32_t zeroSplashUntil = 0;
 bool zeroFired = false;
 
@@ -283,7 +294,16 @@ class CtrlCB : public NimBLECharacteristicCallbacks {
         splashUntil = millis() + 800;
         tOled = 0;
         break;
+      case 0x02: bleZeroReq = true; break;                              // zero pitch/roll
       case 0x03: identifyUntil = millis() + 2000; break;                // identify
+      case 0x04:                                                        // ride state
+        if (v.size() >= 6) {
+          bleRideActiveB = v.data()[1];
+          bleRideElapsedS = (uint32_t)v.data()[2] | ((uint32_t)v.data()[3] << 8) |
+                            ((uint32_t)v.data()[4] << 16) | ((uint32_t)v.data()[5] << 24);
+          bleRideMsg = true;
+        }
+        break;
     }
   }
 };
@@ -371,6 +391,19 @@ void drawDataScreen(uint32_t now) {
   oled.printf("P%+6.1f", pitchD);
 }
 
+void drawTripScreen(uint32_t now) {
+  uint32_t s = rideActive ? (now - tripStartMs) / 1000UL : 0;
+  uint32_t h = s / 3600, m = (s / 60) % 60, sec = s % 60;
+  oled.setTextSize(3);
+  if (h) {                              // 7 chars just fit the 128 px
+    oled.setCursor(1, 5);
+    oled.printf("%lu:%02lu:%02lu", (unsigned long)h, (unsigned long)m, (unsigned long)sec);
+  } else {
+    oled.setCursor(19, 5);
+    oled.printf("%02lu:%02lu", (unsigned long)m, (unsigned long)sec);
+  }
+}
+
 void drawMarkerSplash() {
   oled.fillRect(0, 0, 128, 32, SSD1306_WHITE);
   oled.setTextColor(SSD1306_BLACK);
@@ -405,11 +438,16 @@ void refreshOled(uint32_t now) {
   else if (now < zeroSplashUntil)   drawZeroedSplash();
   else if (now < splashUntil)       drawMarkerSplash();
   else {
-    int idx = screenHold ? heldScreen : (int)((now / 5000) % 2);  // 5 s clock / 5 s data
-    if (idx == 0) drawClockScreen(now); else drawDataScreen(now);
+    int screens = rideActive ? 3 : 2;   // 5 s each: clock / data (/ trip time)
+    int idx = screenHold ? heldScreen : (int)((now / 5000) % screens);
+    if (idx >= screens) idx %= screens; // held trip screen after the ride ends
+    if (idx == 0)      drawClockScreen(now);
+    else if (idx == 1) drawDataScreen(now);
+    else               drawTripScreen(now);
     if (screenHold) oled.drawRect(0, 0, 128, 32, SSD1306_WHITE);  // border = pinned
   }
-  oled.invertDisplay(now < identifyUntil);
+  // recording inverts the whole display; identify blinks relative to that
+  oled.invertDisplay(rideActive != (now < identifyUntil));
   Wire.setClock(400000);                // burst the frame out fast (OLED-only transfer)
   oled.display();
   Wire.setClock(100000);                // back to the BNO055-safe speed
@@ -519,7 +557,7 @@ void loop() {
     uint8_t n = b2Clicks; b2Clicks = 0;
     interrupts();
     if (n & 1) screenHold = !screenHold;
-    if (screenHold) heldScreen = (int)((now / 5000) % 2);
+    if (screenHold) heldScreen = (int)((now / 5000) % (rideActive ? 3 : 2));
     tOled = 0;
     Serial.printf("[screen] %s\n", screenHold ? "held" : "cycling");
   }
@@ -533,6 +571,24 @@ void loop() {
     zeroSplashUntil = now + 1500;
     tOled = 0;
     Serial.println("[zero] mount reference captured & saved");
+  }
+  if (bleZeroReq) {                     // 0x02 from the app — same capture as the hold
+    bleZeroReq = false;
+    if (imuOk) {
+      qRef = lastQuat;
+      saveQRef();
+      zeroSplashUntil = now + 1500;
+      tOled = 0;
+      Serial.println("[zero] mount reference captured & saved (app)");
+    }
+  }
+  if (bleRideMsg) {                     // 0x04: ride state, elapsed is app-authoritative
+    bleRideMsg = false;
+    bool active = bleRideActiveB != 0;
+    uint32_t elapsedS = bleRideElapsedS;
+    if (active) tripStartMs = now - elapsedS * 1000UL;
+    if (active != rideActive) { rideActive = active; tOled = 0; }
+    Serial.printf("[ride] %s at %lus\n", active ? "recording" : "idle", (unsigned long)elapsedS);
   }
 
   // 100 Hz IMU

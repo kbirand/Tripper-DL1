@@ -16,9 +16,12 @@ Tripper-side `ExternalSensorSource` (Swift), enclosure, field ride.
 - **No SD card** — the phone is the recorder; BLE is the only data path
 - **No screen dependence** — the OLED is a convenience dashboard; every
   feature works headless
-- **Mount-zero calibration** — hold a button 10 s and the current orientation
-  becomes 0/0/0 (reference quaternion, persisted to flash, survives reboots,
-  applied to both display and telemetry)
+- **Mount-zero calibration** — hold a button 10 s (or tap *Zero pitch & roll*
+  in the app) and the current orientation becomes 0/0/0 (reference quaternion,
+  persisted to flash, survives reboots, applied to both display and telemetry)
+- **Ride awareness** — while the app records, the OLED runs inverted and a
+  trip-time screen joins the cycle; the state re-syncs on every reconnect, so
+  link flaps and mid-ride reboots heal themselves
 
 ## Hardware
 
@@ -127,7 +130,9 @@ arduino-cli upload  --fqbn esp32:esp32:XIAO_ESP32S3 -p /dev/cu.usbmodem* .
 
 All status lives on the OLED, which alternates every 5 s between a GPS
 clock screen (UTC+3) and a data screen (speed hero, roll/pitch,
-satellites, g, fix dot, link state).
+satellites, g, fix dot, link state). While the app is recording a ride the
+display runs inverted and a third screen joins the cycle: the trip time
+(app-authoritative, so it tracks pauses and survives reconnects).
 
 ## BLE protocol
 
@@ -168,10 +173,12 @@ uptime_s u32 · temp_x10 i16 · marker u8 · reserved u8`
 
 ### Control opcodes
 
-| Byte | Action |
-|---|---|
-| `0x01` | Marker ack — MARK splash on the OLED |
-| `0x03` | Identify — OLED inverts for 2 s |
+| Byte | Payload | Action |
+|---|---|---|
+| `0x01` | — | Marker ack — MARK splash on the OLED |
+| `0x02` | — | Zero roll/pitch/yaw at the current orientation — same as the 10 s button hold, saved to flash |
+| `0x03` | — | Identify — OLED inverts for 2 s (relative to the ride-state invert) |
+| `0x04` | `active u8 · elapsed_s u32` | Ride state — active inverts the OLED and adds the trip-time screen; elapsed seconds seed the timer. The app re-sends it on every reconnect |
 
 ## Docs
 
