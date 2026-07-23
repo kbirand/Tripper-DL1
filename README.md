@@ -180,6 +180,78 @@ uptime_s u32 · temp_x10 i16 · marker u8 · reserved u8`
 | `0x03` | — | Identify — OLED inverts for 2 s (relative to the ride-state invert) |
 | `0x04` | `active u8 · elapsed_s u32` | Ride state — active inverts the OLED and adds the trip-time screen; elapsed seconds seed the timer. The app re-sends it on every reconnect |
 
+## Bike CAN bus (Talaria)
+
+Exploratory, not yet wired into the firmware. The bike's own CAN bus carries
+battery and drivetrain data the puck's sensors can't see — pack voltage, cell
+balance, motor current, state of charge. [`tools/`](tools/) holds the
+bring-up and reverse-engineering kit.
+
+**250 kbit/s, standard 11-bit IDs, 15 messages, ~92 frames/s.** Tap CAN_H and
+CAN_L at the controller. A healthy bus reads 60 Ω across the pair with the
+bike **off** (two 120 Ω terminators in parallel); 120 Ω means you're on one
+end only. If the adapter has a 120 Ω termination jumper, pull it — the bus is
+already terminated at both ends and a third resistor drops it to 40 Ω.
+
+Everything defaults to **listen-only**: the transceiver never drives the bus
+and never even ACKs, so a wrong bitrate cannot disturb the bike.
+
+```sh
+python3 -m venv .venv && ./.venv/bin/pip install -r tools/requirements.txt
+./.venv/bin/python tools/can_sniff.py scan   -p /dev/cu.usbserial-510
+./.venv/bin/python tools/can_sniff.py sniff  -p /dev/cu.usbserial-510 -b 250000
+./.venv/bin/python tools/can_sniff.py events -p /dev/cu.usbserial-510 -b 250000
+```
+
+| Command | Purpose |
+|---|---|
+| `scan` | Sweeps bitrates × STD/EXT and reports which decodes traffic. Zero frames everywhere usually means CAN_H/CAN_L are swapped — harmless, just swap them |
+| `sniff` | Live table: decoded physical values, per-ID rates, per-byte change map |
+| `events` | Learns which bytes drift on their own, then prints only real changes. Operate one control at a time to find what carries it |
+| `log` | Records to `.asc` / `.blf` / `.csv` for offline analysis |
+
+### Decoded signals
+
+Full provenance for each — how it was verified and what was ruled out — is in
+the `CM_` comments of [`tools/talaria.dbc`](tools/talaria.dbc).
+
+| Signal | Frame | Bytes | Scale |
+|---|---|---|---|
+| Speed | `0x303` | 0–1 LE | 0.1 km/h |
+| Motor RPM | `0x203` | 0–1 LE | 1 rpm |
+| Power | `0x203` | 2–3 LE | 1 W |
+| Current | `0x302` | 4–5 LE | 0.1 A |
+| Pack voltage | `0x101` | 0–1 LE | 0.1 V |
+| Battery percentage | `0x401` | 0 | 1 % |
+| Highest cell + index | `0x201` | 0–1 LE, 4 | 1 mV |
+| Lowest cell + index | `0x201` | 2–3 LE, 5 | 1 mV |
+| Kickstand | `0x202` | byte 0 bit 7 | 1 = down |
+| Ride mode | `0x202` | byte 0 bits 5:4 | 1 Eco, 2 Sport |
+| Throttle demand | `0x202` | 3–4 LE | units unconfirmed |
+
+Speed and RPM hold a fixed 5.887 ratio at r = 0.999 across two independent
+rides; integrating speed reproduces plausible ride distances. Cell high/low
+averaged × 16 reproduces pack voltage to 0.02 V, confirming the 16S pack.
+
+Traps worth knowing:
+
+- **`0x103[0]` is not the battery percentage.** It reads a constant 100 while
+  actual charge is elsewhere — almost certainly state of *health*.
+- **`0x202[6:8]` is not an odometer.** It is monotonic, which is why it looks
+  like one, but its rate has correlation −0.0005 with speed and its counts per
+  km differ 34% between rides. No odometer has been found on the bus.
+- **`0x490[0]` is not a temperature.** It is a ride-mode echo (r = 0.99).
+- **Byte offsets vary by firmware.** Throttle demand sits at `0x202[3:5]` here
+  but at `0x202[2:4]` on the bike in the reference logs, where it doesn't
+  track throttle at all. Verify offsets before trusting this on another bike.
+
+Horn and lights never reach the bus — they're switched 12 V circuits from the
+bar switchgear. Brake levers appear on some bikes; aftermarket levers without
+sensors produce nothing.
+
+DBC groundwork from [inklit/Talaria_CAN](https://github.com/inklit/Talaria_CAN),
+whose two ride logs were the reference data for every decode above.
+
 ## Docs
 
 The full build story — shopping list (Turkey), decision records, validation

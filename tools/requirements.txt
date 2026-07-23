@@ -1,0 +1,8 @@
+# CAN tooling for the Waveshare USB-CAN-A (see can_sniff.py).
+# python-can's `seeedstudio` backend speaks the USB-CAN Analyzer serial
+# protocol this adapter uses, including its listen-only mode.
+python-can>=4.6
+pyserial>=3.5
+
+# Only needed to re-run the offline log analysis, not to sniff a live bus.
+numpy>=1.24

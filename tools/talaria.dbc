@@ -1,0 +1,92 @@
+VERSION "Talaria 250 kbit/s CAN - Tripper-DL1"
+
+NS_ :
+    NS_DESC_
+    CM_
+    BA_DEF_
+    BA_
+    VAL_
+    CAT_DEF_
+    CAT_
+    FILTER
+    BA_DEF_DEF_
+    EV_DATA_
+    ENVVAR_DATA_
+    SGTYPE_
+    SGTYPE_VAL_
+    BA_DEF_SGTYPE_
+    BA_SGTYPE_
+    SIG_TYPE_REF_
+    VAL_TABLE_
+    SIG_GROUP_
+    SIG_VALTYPE_
+    SIGTYPE_VALTYPE_
+    BO_TX_BU_
+    BA_DEF_REL_
+    BA_REL_
+    BA_DEF_DEF_REL_
+    BU_SG_REL_
+    BU_EV_REL_
+    BU_BO_REL_
+    SG_MUL_VAL_
+
+BS_:
+BU_: BMS MotorController Dash
+
+
+BO_ 257 BMS_Pack: 8 BMS
+   SG_ PackVoltage : 0|16@1+ (0.1,0) [0|100] "V" Dash
+   SG_ Unknown_2 : 16|16@1+ (1,0) [0|65535] "" Dash
+
+BO_ 513 BMS_Cells: 8 BMS
+   SG_ CellHigh_mV : 0|16@1+ (1,0) [2500|4300] "mV" Dash
+   SG_ CellLow_mV : 16|16@1+ (1,0) [2500|4300] "mV" Dash
+   SG_ CellHigh_Index : 32|8@1+ (1,0) [1|16] "" Dash
+   SG_ CellLow_Index : 40|8@1+ (1,0) [1|16] "" Dash
+   SG_ Unknown_7 : 56|8@1+ (1,0) [0|255] "" Dash
+
+BO_ 514 DisplayState: 8 Dash
+   SG_ Standstill : 1|1@1+ (1,0) [0|1] "" Dash
+   SG_ RideMode : 4|2@1+ (1,0) [0|3] "" Dash
+   SG_ Kickstand : 7|1@1+ (1,0) [0|1] "" Dash
+   SG_ StandUp : 8|1@1+ (1,0) [0|1] "" Dash
+   SG_ Demand : 24|16@1+ (1,0) [0|65535] "" Dash
+   SG_ FreeCounter : 48|12@1+ (1,0) [0|4095] "" Dash
+
+BO_ 515 MotorController: 8 MotorController
+   SG_ MotorRPM : 0|16@1+ (1,0) [0|4500] "rpm" Dash
+   SG_ Power : 16|16@1+ (1,0) [0|8000] "W" Dash
+
+BO_ 770 BMS_Power: 8 BMS
+   SG_ PackVoltage_Coarse : 0|8@1+ (1,0) [0|100] "V" Dash
+   SG_ Current : 32|16@1+ (0.1,0) [0|150] "A" Dash
+
+BO_ 771 VehicleSpeed: 8 MotorController
+   SG_ Speed : 0|16@1+ (0.1,0) [0|100] "km/h" Dash
+
+BO_ 1025 BMS_Status: 8 BMS
+   SG_ StateOfCharge : 0|8@1+ (1,0) [0|100] "%" Dash
+   SG_ Unknown_1 : 8|8@1+ (1,0) [0|255] "" Dash
+   SG_ Unknown_2 : 16|8@1+ (1,0) [0|255] "" Dash
+   SG_ Unknown_3 : 24|8@1+ (1,0) [0|255] "" Dash
+
+BO_ 1168 ModeEcho: 8 MotorController
+   SG_ ModeLevel : 0|8@1+ (1,0) [0|255] "" Dash
+
+
+CM_ BO_ 257 "Pack voltage at 0.1 V resolution. Cross-checked against the sum of the 16 cell voltages in 0x201.";
+CM_ BO_ 513 "Reports only the pack's highest and lowest cell, not a round-robin of all 16 - bytes 0-1 exceed bytes 2-3 in 100% of 18447 logged frames, and a parked bike holds the same two indices indefinitely. The individual 16 cells are therefore never all observable. CellHigh + CellLow averaged and multiplied by 16 reproduces 0x101 PackVoltage to within 0.02 V.";
+CM_ BO_ 515 "MotorRPM and Speed (0x303) correlate at r=0.999 with a fixed ratio of 5.887 across two independent ride logs.";
+CM_ SG_ 515 Power "Peak 5740 W vs peak V*I of 5923 W computed from 0x101 voltage and 0x302 current - agrees to ~3%.";
+CM_ SG_ 770 Current "0.1 A units, peaks near 102 A.";
+CM_ SG_ 771 Speed "0.1 km/h. Integrating over ride_2 gives 8.93 km in 27.2 min (19.7 km/h average); over ride_1, 3.05 km in 8.3 min.";
+CM_ SG_ 1025 StateOfCharge "Reads exactly 100 for all of ride_1 and steps monotonically 86 -> 75 across ride_2.";
+CM_ SG_ 514 FreeCounter "12-bit free-running counter. NOT an odometer - it accumulates while stopped and its counts/km differ by 34% between rides.";
+CM_ SG_ 514 Kickstand "Hard interlock, confirmed twice. In the ride logs it is set for 12.4%/35.2% of samples but 0.00% of samples above 2 km/h (max speed while set: 0.0 km/h). Directly toggled on the bench 2026-07-23: folding the stand drove 0x202[0] 0x20 <-> 0xA0.";
+CM_ SG_ 514 StandUp "Companion to Kickstand, inverted: 0x202[1] bit0 goes 1 -> 0 on the same frame the stand comes down. Observed on every bench toggle.";
+CM_ SG_ 514 Demand "Bench-observed: rests at a mode floor (750 Eco / 1100 Sport) and climbs to 1200 under throttle, LEADING MotorRPM by ~0.3 s - it moves before the motor responds, so it is a command rather than a measurement. 1200 also appears as a fixed constant in 0x101[4:6] and 0x302[6:8], consistent with a rated ceiling. If the units are 0.1 A this reads as 75.0/110.0 A limits against a 120.0 A rating, and ride_2's peak current of 101.6 A against its own 1000 (=100.0 A) ceiling supports that - but it is one data point, so treat the unit as unconfirmed. WARNING: on the firmware in the inklit ride logs this field sits one byte lower, at 0x202[2:4], and is mode-linked only - it does not track throttle there. Check the offset before trusting it on another bike.";
+CM_ BO_ 1168 "NOT a temperature. 0x490[0] correlates 0.996 (ride_1) and 0.963 (ride_2) with RideMode and only 0.30/0.43 with elapsed time. Confirmed on the bench 2026-07-23: switching Eco/Sport drove it 0x09 <-> 0x11 in the same frame as the 0x202[0] mode bits. An earlier reading of it as a warming component was wrong; the apparent rise across ride_2 was the rider changing mode.";
+
+VAL_ 514 Standstill 0 "Rolling" 1 "Stopped" ;
+VAL_ 514 Kickstand 0 "Up" 1 "Down" ;
+VAL_ 514 RideMode 1 "Eco" 2 "Sport" ;
