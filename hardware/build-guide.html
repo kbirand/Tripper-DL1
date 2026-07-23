@@ -194,13 +194,13 @@
 <div class="scroller">
 <div class="wrap">
   <header>
-    <div class="eyebrow">Tripper Hardware · v1 Field Guide</div>
+    <div class="eyebrow">Tripper Hardware · e-bike edition</div>
     <h1>Tripper Puck</h1>
-    <p class="dek">A matchbox-sized GPS + IMU + barometer ride logger that records to microSD, marks moments with one button, and charges over USB-C. Headless by design — <b>the Tripper app is its screen</b>.</p>
+    <p class="dek">A matchbox-sized GPS + IMU + barometer telemetry puck that streams to the Tripper app over BLE and reads the bike's own CAN bus. Powered from the bike through a 5 V BEC — no battery, no SD card. Headless by design: <b>the phone is its recorder, the OLED is a convenience</b>.</p>
     <div class="meta">
       <span class="chip">Budget <b>≈ ₺2.700 core</b></span>
       <span class="chip">Size <b>≈ 55 × 40 × 22 mm</b></span>
-      <span class="chip">Runtime <b>20+ h / charge</b></span>
+      <span class="chip">Power <b>bike 5 V BEC</b></span>
       <span class="chip">Build time <b>1 weekend</b></span>
     </div>
   </header>
@@ -212,15 +212,15 @@
       <p>Why this stays small: the entire physical interface is four things.</p>
     </div>
     <div class="grid">
-      <div class="card"><div class="k">Charging</div><div class="v">USB-C</div><div class="s">XIAO's built-in LiPo charger — no extra board</div></div>
-      <div class="card"><div class="k">Power / record</div><div class="v">Slide switch</div><div class="s">On = auto-record when moving with a GPS fix</div></div>
-      <div class="card"><div class="k">Markers</div><div class="v">One button</div><div class="s">12 mm glove-friendly top button = drop marker</div></div>
-      <div class="card"><div class="k">Status</div><div class="v">OLED</div><div class="s">0.91" screen — clock/data + all status (LED dropped)</div></div>
+      <div class="card"><div class="k">Power</div><div class="v">5 V BEC</div><div class="s">Steps the bike's pack to 5 V → VUSB · no battery, boots with the bike</div></div>
+      <div class="card"><div class="k">Recorder</div><div class="v">The phone</div><div class="s">BLE telemetry into the Tripper app · no SD card</div></div>
+      <div class="card"><div class="k">Buttons</div><div class="v">Two</div><div class="s">D1 steps screens · D2 marks / zeroes attitude</div></div>
+      <div class="card"><div class="k">Status</div><div class="v">OLED</div><div class="s">0.91" screen — clock / data / bike-CAN + all status</div></div>
     </div>
     <p>Everything else — live dashboard, reviewing rides, naming, exporting — already exists in the Tripper app.</p>
     <div class="note marker">
-      <b>Scope pivot — e-bike edition (2026-07-21)</b>
-      The puck now targets the e-bike: powered from the bike's USB (<b>no LiPo, no slide switch</b>) and <b>BLE-first with no microSD</b> — the phone records through the Tripper app's recorder pipeline, so the old v2 BLE link <em>is</em> the product. Consequences: LiPo + SD module go to the spares bin, pins D3/D8–D10 are free again, the auto-record state machine moves into the app, and the puck becomes a stateless sensor that boots with the bike. Marker button stays (marker goes over BLE); the NeoPixel was dropped — the 0.91" OLED carries all status, plus a second button (D2) for screen-hold and mount-zero. Trade-off accepted with open eyes: <b>no BLE link = no data for that stretch</b> — the SD "black box" is gone; re-add it later if a lost ride ever hurts. Verify the bike's USB doesn't auto-cut at low load or at standstill.
+      <b>Scope pivot — e-bike edition (2026-07-21, CAN added 2026-07-23)</b>
+      The puck targets the e-bike: powered from the bike through a <b>5 V BEC</b> (<b>no LiPo, no slide switch</b>) and <b>BLE-first with no microSD</b> — the phone records through the Tripper app's recorder pipeline, so the old v2 BLE link <em>is</em> the product. Consequences: LiPo + SD module + slide switch + NeoPixel are gone, the auto-record state machine moves into the app, and the puck becomes a stateless sensor that boots with the bike. It gained a second input path: a listen-only <b>SN65HVD230 CAN transceiver</b> on D8/D9 reads the bike's own bus (battery %, pack voltage, cell balance, motor current, kickstand, ride mode) straight into the telemetry packet. Status lives entirely on the 0.91" OLED; the two buttons are D1 (screens) and D2 (marker / mount-zero). Trade-off accepted with open eyes: <b>no BLE link = no data for that stretch</b> — the SD "black box" is gone; re-add it later if a lost ride ever hurts. Verify the BEC holds 5 V at standstill and doesn't drop out at low load.
     </div>
     <div class="note">
       <b>Design rule</b>
@@ -249,7 +249,7 @@
           <tr class="got">
             <td><span class="pill got">Obtained</span></td>
             <td><b>Seeed XIAO ESP32-S3</b><span class="got-note">SAMM order SM83985 · 2026-07-10</span></td>
-            <td>Brain · BLE 5.0 · LiPo charging built in</td>
+            <td>Brain · BLE 5.0 · on-chip TWAI CAN controller</td>
             <td><a href="https://market.samm.com/en/seeed-studio-xiao-esp32s3-en">SAMM</a></td>
             <td class="num">₺400–600</td>
           </tr>
@@ -269,31 +269,24 @@
           </tr>
           <tr class="got">
             <td><span class="pill got">Obtained</span></td>
-            <td><b>MicroSD module (SPI)</b> + 8–32 GB card<span class="got-note">2026-07-11</span></td>
-            <td>CSV storage — a year of rides fits easily</td>
-            <td>Direnc.net · Robotistan</td>
-            <td class="num">₺50–100</td>
-          </tr>
-          <tr class="got">
-            <td><span class="pill got">Obtained</span></td>
-            <td><b>LiPo 3.7 V 1000–1200 mAh</b> (JST-PH)<span class="got-note">2026-07-11</span></td>
-            <td>20+ hours of continuous logging</td>
-            <td>Robotistan · Direnc.net</td>
-            <td class="num">₺150–300</td>
-          </tr>
-          <tr class="got">
-            <td><span class="pill got">Obtained</span></td>
-            <td><b>Controls kit</b>: slide switch, 12 mm button, 1× WS2812/NeoPixel LED<span class="got-note">2026-07-11</span></td>
-            <td>Power · marker · status</td>
-            <td>any hobby shop</td>
-            <td class="num">₺50–100</td>
-          </tr>
-          <tr class="got">
-            <td><span class="pill got">Obtained</span></td>
             <td><b>SN65HVD230 CAN module</b><span class="got-note">Alkatronik / Hepsiburada · 2026-07-23</span></td>
             <td><b>Reads the bike's own CAN bus</b> — 3.3 V transceiver, no level shifting. The ESP32-S3's built-in TWAI controller is the CAN peripheral; this is only the physical layer.</td>
             <td><a href="https://www.hepsiburada.com/alkatronik-sn65hvd230-can-modulu-p-HBCV00000FDLXI">Hepsiburada</a></td>
             <td class="num">₺60–120</td>
+          </tr>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
+            <td><b>5 V BEC, 3 A</b> (DC-DC step-down)<span class="got-note">2026-07-23</span></td>
+            <td>Steps the bike's traction pack down to a clean 5 V and feeds the XIAO's VUSB pin. Sized well above the ~150 mA the puck draws.</td>
+            <td>any hobby / RC shop</td>
+            <td class="num">₺100–200</td>
+          </tr>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
+            <td><b>Buttons</b>: 12 mm glove button + HW-483<span class="got-note">2026-07-11</span></td>
+            <td>D1 = screens · D2 = marker / mount-zero (no slide switch, no status LED)</td>
+            <td>any hobby shop</td>
+            <td class="num">₺30–60</td>
           </tr>
           <tr class="got">
             <td><span class="pill got">Obtained</span></td>
@@ -304,7 +297,7 @@
           </tr>
         </tbody>
         <tfoot>
-          <tr><td colspan="4">Core total</td><td class="num">≈ ₺2.700–3.600</td></tr>
+          <tr><td colspan="4">Core total</td><td class="num">≈ ₺2.600–3.500</td></tr>
         </tfoot>
       </table>
     </div>
@@ -383,10 +376,10 @@
           <tr><td class="mono">D2</td><td class="mono">GPIO3</td><td>Marker/zero button → GND (HW-483)</td><td>Click = marker · 10 s hold = zero attitude (saved to NVS)</td></tr>
           <tr><td class="mono">D8</td><td class="mono">GPIO7</td><td>SN65HVD230 <span class="mono">CTX</span></td><td>CAN TX — straight through, <b>not</b> a crossover like the GPS UART</td></tr>
           <tr><td class="mono">D9</td><td class="mono">GPIO8</td><td>SN65HVD230 <span class="mono">CRX</span></td><td>CAN RX — 250 kbit/s, listen-only (ESP32-S3 TWAI controller)</td></tr>
-          <tr><td class="mono">D0</td><td class="mono">GPIO1</td><td><em>free</em></td><td>NeoPixel dropped 2026-07-21 — the OLED carries all status</td></tr>
-          <tr><td class="mono">D3, D10</td><td class="mono">—</td><td><em>free</em> (former SD pins)</td><td>e-bike edition: no SD</td></tr>
-          <tr><td class="mono">USB-C</td><td>—</td><td>E-bike USB outlet / power bank</td><td>Power — no battery; the puck boots with the bike</td></tr>
-          <tr><td class="mono">3V3 / GND</td><td>—</td><td>All module VCC / GND</td><td>Power rails</td></tr>
+          <tr><td class="mono">D0, D3, D10</td><td class="mono">—</td><td><em>free</em></td><td>Former NeoPixel / SD pins — e-bike edition uses neither</td></tr>
+          <tr><td class="mono">5V (VUSB)</td><td>—</td><td><b>5 V BEC</b> +out (from the bike)</td><td>Power in — no battery; the puck boots with the bike. USB-C is for flashing only</td></tr>
+          <tr><td class="mono">GND</td><td>—</td><td>BEC −out + all module GND</td><td>Common ground — also the bike's ground via the BEC, so the CAN tap needs no extra ground wire</td></tr>
+          <tr><td class="mono">3V3</td><td>—</td><td>All module VCC (CAN, Gravity, OLED, GPS)</td><td>3.3 V rail off the XIAO regulator</td></tr>
         </tbody>
       </table>
     </div>
@@ -414,8 +407,8 @@
 
     <div class="note warn">
       <b>Never connect USB and the bike at the same time</b>
-      Once <span class="mono">CANH</span>/<span class="mono">CANL</span> are spliced in, the puck's ground <em>is</em> the bike's ground. Attaching a mains-earthed computer ties the traction battery's negative to protective earth through your machine. Worse, feeding the <span class="mono">5V</span> pin while USB is attached back-feeds the bike's 5 V rail into the host port — on the XIAO that pin is USB VBUS with nothing in between, and it can kill the port.<br><br>
-      Fit a <b>2-pin connector</b> in the CANH/CANL run so unplugging to flash is one action. Read telemetry over BLE instead of serial — the puck is a BLE device; use what it already does.
+      Once <span class="mono">CANH</span>/<span class="mono">CANL</span> are spliced in, the puck's ground <em>is</em> the bike's ground — shared through the BEC's negative rail. Attaching a mains-earthed computer ties the traction battery's negative to protective earth through your machine. Worse, the BEC drives 5 V into the XIAO's <span class="mono">5V</span> (VUSB) pin; plug a USB host in on top of that and two 5 V rails collide on the same node.<br><br>
+      Fit a <b>2-pin connector</b> in the CANH/CANL run, and kill the BEC (or unplug that connector) before you attach USB to flash. Read telemetry over BLE instead of serial — the puck is a BLE device; use what it already does.
     </div>
 
     <div class="note warn">
@@ -440,7 +433,7 @@
 
     <div class="note">
       <b>No ground wire in the CAN tap</b>
-      Only two wires reach the bike harness. The puck runs off the bike's USB outlet, which already ties the two grounds together — a third wire would just add a redundant loop. This is also why a laptop on mains is such a problem: it introduces a <em>second</em> ground path.
+      Only two wires reach the bike harness. The puck and the bike already share a ground through the BEC's negative rail, so a third wire in the CAN tap would just add a redundant loop. This is also why a laptop on mains is such a problem: it introduces a <em>second</em> ground path.
     </div>
 
     <div class="note">
@@ -482,34 +475,38 @@
         <p><b>✅ Fix acquired 2026-07-21</b> — NMEA + TinyGPS++ verified, MON-VER confirms genuine u-blox 8 (ROM 3.01, PROTVER 18, GPS/GLO/BDS/QZSS). Config applied &amp; verified same day (<span class="mono">firmware/gps_config_5hz/</span>): CFG-RATE 200 ms ACKed, read-back confirmed, saved to BBR, measured 5.0 GGA/s at 115200. Production firmware re-applies at every boot in case the backup battery ever drains. Bench extra that got promoted: 0.91" SSD1306 OLED at <span class="mono">0x3C</span> on the shared I²C bus — now integral to <span class="mono">firmware/tripper_puck/</span> (clock/data screens, hold toggle, zero progress UI).</p>
       </li>
       <li>
-        <h3>Log to SD</h3>
-        <p>SdFat example → create <span class="mono">/rides/2026-07-12_1030.csv</span>, write rows, power-cycle mid-write and confirm the file survives (write header + flush every second).</p>
+        <h3>Bring up the CAN bus</h3>
+        <p>Remove the SN65HVD230's onboard <span class="mono">121</span> terminator (see the Bike CAN section), wire CTX→D8 / CRX→D9, and tap CANH/CANL at the controller. Flash <span class="mono">firmware/can_probe/</span> — it brings TWAI up at 250 kbit/s <b>listen-only</b> and reports a decoded dashboard on the OLED and over BLE (device <span class="mono">Tripper-CAN</span>, Nordic UART).</p>
+        <p><b>Read wirelessly, not over serial</b> — once CANH/CANL are spliced in you must never also attach a USB host (see the warning in the Bike CAN section). Zero frames on the OLED almost always means CANH/CANL are swapped: harmless, just swap them.</p>
+        <p><b>✅ Verified on the bench 2026-07-23</b> — Talaria bus decoded end to end: 250 kbit/s, 15 IDs, and the module reproduced the reference numbers (81 %, 64.3 V, kickstand, ride mode) captured independently with a USB-CAN dongle.</p>
       </li>
       <li>
         <h3>Integrate the firmware</h3>
         <p>Combine into the main sketch (architecture below). Bench-test auto-record by shaking + walking outside.</p>
-        <p><b>✅ e-bike edition firmware running (2026-07-21)</b> — <span class="mono">firmware/tripper_puck/</span>: BLE service (telemetry 5 Hz / status 1 Hz / control), designed OLED screens alternating clock/data with hold toggle, marker button, 10 s mount-zero (reference quaternion, persisted to NVS, applied to display <em>and</em> telemetry), GPS autoconfig at boot. Phone-verified with LightBlue: connect, notify stream, control writes all working.</p>
+        <p><b>✅ e-bike edition firmware running (2026-07-21, CAN added 2026-07-23)</b> — <span class="mono">firmware/tripper_puck/</span>: BLE service (telemetry 5 Hz / status 1 Hz / control), OLED screens (clock / data / bike-CAN, stepped by D1), marker button, 10 s mount-zero (reference quaternion, persisted to NVS, applied to display <em>and</em> telemetry), GPS autoconfig at boot, and listen-only CAN folded into the 70-byte telemetry packet. Phone-verified with LightBlue: connect, notify stream, control writes all working.</p>
       </li>
       <li>
         <h3>Solder the stack</h3>
         <ul>
           <li>Shorten all wires to final lengths; silicone wire tolerates vibration best.</li>
-          <li>Battery + slide switch inline on BAT+, heat-shrink everything.</li>
-          <li>Button in the lid, NeoPixel glued behind a 2 mm wall (it shines through).</li>
+          <li>BEC +out → the XIAO 5V (VUSB) pin, BEC −out → GND. Heat-shrink everything; the BEC's input taps the bike's pack / accessory line.</li>
+          <li>Put a <b>2-pin connector in the CANH/CANL run</b> so you can isolate the bike before ever attaching USB to flash.</li>
+          <li>Both buttons in the lid; the OLED window plus the SN65HVD230 on its own short pigtail.</li>
         </ul>
       </li>
       <li>
         <h3>Enclosure &amp; mounting</h3>
         <ul>
-          <li>Print a two-part case ≈ 55 × 40 × 22 mm; cutouts: USB-C, switch, button. Search "XIAO ESP32S3 GPS logger case" on Printables for starting points.</li>
+          <li>Two enclosures, split rear / handlebar: the ESP32, CAN module and sensor board ride at the rear near the controller tap; the OLED, two buttons and GPS sit at the handlebar.</li>
+          <li>Print a two-part case ≈ 55 × 40 × 22 mm; cutouts: USB-C (flashing), two buttons, the OLED window, and the CAN + BEC leads. Search "XIAO ESP32S3 GPS logger case" on Printables for starting points.</li>
           <li>Sensor board sits on the 2 mm foam pad — isolates handlebar buzz from the accelerometer.</li>
           <li>GPS antenna under a 1.5 mm lid section (plastic is RF-transparent), ESP32 at the opposite end.</li>
-          <li>Mount the case <b>rigidly</b> to the bar (the foam is inside, not outside) — same rule as the phone.</li>
+          <li>Mount the cases <b>rigidly</b> to the bar/frame (the foam is inside, not outside) — same rule as the phone.</li>
         </ul>
       </li>
       <li>
         <h3>Field-verify against Tripper</h3>
-        <p>Ride with the puck and the phone app recording simultaneously. Distances should agree within a few percent; the puck's 5–10 Hz track should look <em>smoother</em> in corners. Import the CSV and compare charts.</p>
+        <p>Ride with the puck and the phone app recording simultaneously. Distances should agree within a few percent; the puck's 5 Hz track should look <em>smoother</em> in corners, and the CAN block should carry live battery %, pack voltage and ride mode. Compare in the app — the BLE stream is the only data path, there is no file to import.</p>
       </li>
     </ol>
   </section>
@@ -529,101 +526,86 @@
           <tr><td class="mono">Adafruit BNO055 + Adafruit Unified Sensor</td><td>Quaternions, linear accel &amp; gravity vector at 100 Hz — fusion runs on the chip</td></tr>
           <tr><td class="mono">TinyGPSPlus</td><td>NMEA parsing (lat/lon/alt/speed/course/hdop/time)</td></tr>
           <tr><td class="mono">Adafruit BMP280</td><td>BMP280 pressure → altitude</td></tr>
-          <tr><td class="mono">SdFat</td><td>Fast, reliable FAT32 logging</td></tr>
-          <tr><td class="mono">Adafruit NeoPixel</td><td>Status LED</td></tr>
-          <tr><td class="mono">NimBLE-Arduino <i>(v2)</i></td><td>BLE link to the Tripper app</td></tr>
+          <tr><td class="mono">Adafruit SSD1306 + Adafruit GFX</td><td>0.91" OLED — clock / data / bike-CAN screens</td></tr>
+          <tr><td class="mono">NimBLE-Arduino</td><td>BLE link to the Tripper app</td></tr>
+          <tr><td class="mono">driver/twai.h <i>(ESP-IDF, bundled)</i></td><td>On-chip CAN controller — listen-only, no external library</td></tr>
+          <tr><td class="mono">Preferences <i>(bundled)</i></td><td>Persist the mount-zero reference quaternion to NVS</td></tr>
         </tbody>
       </table>
     </div>
 
-    <h3>Main loop (three rates)</h3>
-<pre><code>100 Hz  IMU: read BNO055 quaternion (fusion already done on-chip)
+    <h3>Main loop (rates)</h3>
+<pre><code>every pass  GPS: drain the UART into TinyGPS++
+           CAN: drain the TWAI RX queue (bounded to 16 frames/pass),
+                latch the newest payload of each decoded ID
+
+100 Hz  IMU: read BNO055 quaternion (fusion already done on-chip)
         → reference-frame math
         (same as Tripper: slope = asin(fwd_world.z), g = dot products)
         latch interval max-g
 
- 5–10 Hz GPS: parse UART continuously; on each fix update
-        position, speed, course; accumulate distance with the
-        3 m anchor rule (skip jitter while stopped)
+  5 Hz  TELEMETRY: assemble the 70-byte packed sample (GPS + IMU +
+        the CAN block, zeroed unless a frame arrived in the last 2 s)
+        and BLE-notify it
 
- 5 Hz   LOG: assemble one CSV row from latest values,
-        write to SD, flush once per second
+  1 Hz  HOUSEKEEPING: BLE status notify, baro sample, serial debug line</code></pre>
 
- 1 Hz   HOUSEKEEPING: auto-record state machine, LED state,
-        battery voltage read, baro sample (25 Hz internally, averaged)</code></pre>
-
-    <h3>Auto-record state machine</h3>
-<pre><code>IDLE       → RECORDING   when fix valid AND speed &gt; 2 m/s for 5 s
-RECORDING  → AUTO-PAUSED when speed &lt; 1 m/s for 3 min
-AUTO-PAUSED→ RECORDING   when speed &gt; 2 m/s again (new file segment? no —
-                          same file, paused time excluded like the app)
-any state  → CLOSED      on power switch off (flush + close in the
-                          brown-out grace window — flush often!)</code></pre>
+    <p>No SD, no CSV, no auto-record state machine — those moved to the phone. The puck is a stateless sensor: it streams, the app records and decides when a ride is running (and tells the puck over the <span class="mono">control</span> characteristic, which is what flips the OLED into trip-time mode).</p>
 
     <h3>Buttons</h3>
     <p>Both sit on pin-change ISRs with 50 ms debounce, so presses land even while the loop is stalled. Each discriminates click from hold the same way: the ISR timestamps the press and counts a click only if the release lands inside 600 ms, so a long hold never also fires a click.</p>
     <p><b>D1 (12 mm glove button)</b> — click steps to the next OLED screen · 3 s hold toggles auto-cycling. Screens do <em>not</em> rotate on their own by default: on a moving bike the screen you picked should stay put.</p>
     <p><b>D2 (HW-483)</b> — click drops a marker into the telemetry packet · 10 s hold zeroes roll/pitch/yaw and saves the reference quaternion to NVS.</p>
 
-    <h3>LED states</h3>
-    <p style="display:flex; flex-wrap:wrap; gap:18px; margin-top:10px;">
-      <span class="led"><span class="dot" style="background:var(--warn); color:var(--warn);"></span> blinking — searching for fix</span>
-      <span class="led"><span class="dot" style="background:var(--ok); color:var(--ok);"></span> solid — fix, ready</span>
-      <span class="led"><span class="dot" style="background:var(--danger); color:var(--danger);"></span> slow pulse — recording</span>
-      <span class="led"><span class="dot" style="background:var(--accent); color:var(--accent);"></span> flash — marker stamped</span>
-    </p>
+    <h3>Status — all on the OLED</h3>
+    <p>There is no status LED (the NeoPixel was dropped). Everything reads off the 0.91" screen: a fix dot (hollow → solid on lock), <span class="mono">LINK</span>/<span class="mono">ADV</span> for the BLE state, satellite bars, MARK and ZEROED splashes, and the bike-CAN screen's own <span class="mono">no data</span> / <span class="mono">off</span> indicator. During a ride (app-driven) the whole display inverts and a trip-time screen joins the rotation.</p>
 
-    <h3>CSV format — Tripper-compatible</h3>
-    <p>Use the app's exact header so files drop straight into the same analysis/video-overlay workflow:</p>
-<pre><code>timestamp,elapsed_s,lat,lon,alt_m,baro_alt_m,pressure_kpa,h_acc_m,v_acc_m,
-speed_mps,speed_kmh,heading_deg,distance_m,imu_slope_deg,imu_slope_pct,
-gps_slope_deg,gps_slope_pct,roll_deg,pitch_deg,yaw_deg,current_g,max_g,
-longitudinal_g,lateral_g,vertical_g,rot_x,rot_y,rot_z,marker</code></pre>
-    <p style="font-size:.9rem; color:var(--ink-2);">Timestamps come from GPS time (free, perfect for syncing with the phone and video). <span class="mono">h_acc_m</span> ≈ HDOP × 5 as a rough map. Fields you can't measure yet: write <span class="mono">0</span> — same as the app before a fix.</p>
+    <h3>On-air format — the BLE telemetry packet</h3>
+    <p>There is no file. The data leaves as a 70-byte packed little-endian sample notified at 5 Hz — GPS, quaternion, linear/​max g, marker, then the bike-CAN block (speed, rpm, power, current, pack voltage, battery %, throttle demand, cell high/low, kickstand, ride mode). The app's <span class="mono">ExternalSensorSource</span> feeds it into the same recorder pipeline the phone sensors use. Full offset table: see <span class="mono">README.md</span> → BLE protocol.</p>
   </section>
 
   <!-- ============================================================ -->
   <section>
     <div class="sec-head">
-      <h2>Power budget</h2>
-      <p>Why this outlasts any phone.</p>
+      <h2>Power</h2>
+      <p>No battery. The puck runs off the bike through a 5 V BEC, so the only question is whether the BEC has margin — and it has a lot.</p>
     </div>
     <div class="tablewrap">
       <table>
         <thead><tr><th>Consumer</th><th>Typical draw</th></tr></thead>
         <tbody>
-          <tr><td>GPS (NEO-M8N, tracking)</td><td class="num">≈ 30 mA</td></tr>
-          <tr><td>ESP32-S3 (BLE off, 80 MHz)</td><td class="num">≈ 20–30 mA</td></tr>
+          <tr><td>ESP32-S3 (BLE active)</td><td class="num">≈ 40–70 mA</td></tr>
+          <tr><td>GPS (NEO-8M, tracking)</td><td class="num">≈ 30 mA</td></tr>
+          <tr><td>OLED</td><td class="num">≈ 10 mA</td></tr>
           <tr><td>IMU + barometer</td><td class="num">≈ 4 mA</td></tr>
-          <tr><td>SD writes (amortized)</td><td class="num">≈ 5 mA</td></tr>
-          <tr><td>NeoPixel (dim)</td><td class="num">≈ 2 mA</td></tr>
+          <tr><td>SN65HVD230 (listen-only)</td><td class="num">≈ 5 mA</td></tr>
         </tbody>
         <tfoot>
-          <tr><td>Total ≈ 60–70 mA → <b>1000 mAh ÷ 65 mA</b></td><td class="num">≈ 15–20 h</td></tr>
+          <tr><td>Total ≈ 100–150 mA against a <b>3 A</b> BEC</td><td class="num">&lt; 5% load</td></tr>
         </tfoot>
       </table>
     </div>
-    <p style="font-size:.9rem; color:var(--ink-2);">Add BLE streaming (v2): +10–15 mA. Drop the CPU to 80 MHz and dim the LED — both are one-line changes worth doing.</p>
+    <p style="font-size:.9rem; color:var(--ink-2);">The BEC is oversized on purpose — headroom for inrush at boot and for a phone charging off the same outlet if you ever add one. The one thing to check on your bike: that the BEC's input line stays live at standstill and doesn't cut at low load, or the puck drops out every time you stop.</p>
   </section>
 
   <!-- ============================================================ -->
   <section>
     <div class="sec-head">
-      <h2>v2 — the Bluetooth link to Tripper</h2>
-      <p>When the hardware works, the puck becomes a live sensor for the app.</p>
+      <h2>The Bluetooth link to Tripper</h2>
+      <p>The puck is a live sensor for the app — this is the product, not a future phase.</p>
     </div>
-    <p>One BLE service, three characteristics:</p>
+    <p>One BLE service (<span class="mono">Tripper-DL1</span>), three characteristics:</p>
     <div class="tablewrap">
       <table>
         <thead><tr><th>Characteristic</th><th>Direction</th><th>Payload</th></tr></thead>
         <tbody>
-          <tr><td class="mono">telemetry</td><td>notify → phone</td><td>Packed sample @ 5–10 Hz: fix, lat, lon, alt, speed, course, quat, g, baro</td></tr>
-          <tr><td class="mono">status</td><td>notify → phone</td><td>Battery %, fix quality, record state, SD free space</td></tr>
-          <tr><td class="mono">control</td><td>write ← phone</td><td>start / stop / marker / set time</td></tr>
+          <tr><td class="mono">telemetry</td><td>notify → phone</td><td>70-byte packed sample @ 5 Hz: fix, lat, lon, alt, speed, course, quat, g, baro, marker + the bike-CAN block</td></tr>
+          <tr><td class="mono">status</td><td>notify → phone</td><td>14 bytes @ 1 Hz: fix quality, sats, uptime, temperature, marker</td></tr>
+          <tr><td class="mono">control</td><td>write ← phone</td><td>marker ack · zero attitude · identify · ride state (active + elapsed)</td></tr>
         </tbody>
       </table>
     </div>
-    <p>App side: an <span class="mono">ExternalSensorSource</span> that feeds the same recorder pipeline the phone sensors use today — the dashboard, Dynamic Island, overlays, and exports all work unchanged, just with 10 Hz GPS. The phone's Marker button then stamps markers into <em>both</em> logs.</p>
+    <p>App side: an <span class="mono">ExternalSensorSource</span> that feeds the same recorder pipeline the phone sensors use today — the dashboard, Dynamic Island, overlays, and exports all work unchanged, now with 5 Hz GPS <em>and</em> the bike's own battery/drivetrain data. The phone's Marker button stamps markers into <em>both</em> logs. Exact byte layout and control opcodes: <span class="mono">README.md</span> → BLE protocol.</p>
   </section>
 
   <!-- ============================================================ -->
@@ -632,13 +614,13 @@ longitudinal_g,lateral_g,vertical_g,rot_x,rot_y,rot_z,marker</code></pre>
       <h2>Pitfalls — read before soldering</h2>
     </div>
     <ul class="check">
+      <li><input type="checkbox"> <b>BEC vs USB — never both:</b> the BEC feeds 5 V into VUSB. Plugging USB in while the BEC is powered collides two 5 V rails and, with the CAN tap connected, bridges the bike's ground to mains earth. Kill the BEC or unplug the CAN connector before flashing.</li>
+      <li><input type="checkbox"> <b>CAN terminator:</b> remove the module's onboard <span class="mono">121</span> (120 Ω) resistor — the bike's bus is already terminated at 60 Ω and a third makes it 40 Ω. Measure open across CANH/CANL before wiring in.</li>
+      <li><input type="checkbox"> <b>CANH/CANL swap:</b> harmless but silent — you just get zero frames. If the probe shows no data, swap the pair first.</li>
+      <li><input type="checkbox"> <b>BEC dropout at standstill:</b> confirm the BEC's input line stays live when the bike is stopped, or the puck reboots every time you stop.</li>
       <li><input type="checkbox"> <b>GPS near ESP32:</b> keep antenna ≥ 15 mm from the module and USB cable; test fix time before gluing anything.</li>
       <li><input type="checkbox"> <b>Fake u-blox:</b> ultra-cheap marketplace "M8N" boards are often older chips reflashed — buy from drone shops; verify with u-center over serial.</li>
-      <li><input type="checkbox"> <b>Clone compass:</b> QMC5883L at <span class="mono">0x0D</span> masquerading as HMC5883L — different library, not a defect.</li>
-      <li><input type="checkbox"> <b>SD corruption:</b> flush every second, close file on the auto-pause; never rely on clean power-down.</li>
       <li><input type="checkbox"> <b>Vibration:</b> foam under the sensor board or your g-force column is engine buzz.</li>
-      <li><input type="checkbox"> <b>Brown-out on SD writes:</b> add a 470 µF capacitor across the SD module's supply if you see random resets.</li>
-      <li><input type="checkbox"> <b>Charging heat:</b> the XIAO's charge IC is under the board — leave the underside ventilated in the case.</li>
       <li><input type="checkbox"> <b>Waterproofing:</b> conformal coat the boards or accept "shower-proof"; keep the USB port plugged with a rubber stopper.</li>
     </ul>
   </section>

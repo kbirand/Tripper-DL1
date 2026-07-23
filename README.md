@@ -8,16 +8,18 @@ A matchbox-sized BLE telemetry puck for e-bikes — companion hardware for the
 [Tripper iOS app](https://github.com/kbirand/Tripper). It streams 5 Hz GPS,
 on-chip-fused IMU orientation, and barometric data to the phone over
 Bluetooth LE; the app records, analyzes, and exports. The puck itself is
-stateless: it powers from the bike's USB, boots in seconds, and needs no
-interaction beyond a marker button. It also reads the bike's own CAN bus
-listen-only, adding battery, drivetrain and rider-control data to the stream.
+stateless: it powers from the bike through a 5 V BEC, boots in seconds, and
+needs no interaction beyond a marker button. It also reads the bike's own CAN
+bus listen-only, adding battery, drivetrain and rider-control data to the
+stream.
 
 **Status:** bench-complete and phone-verified (2026-07-21). Remaining:
 Tripper-side `ExternalSensorSource` (Swift), enclosure, field ride.
 
 ## How it works
 
-- **No battery** — powered by the e-bike's USB outlet; boots with the bike
+- **No battery** — a 5 V BEC steps the bike's pack down to VUSB; boots with
+  the bike
 - **No SD card** — the phone is the recorder; BLE is the only data path
 - **No screen dependence** — the OLED is a convenience dashboard; every
   feature works headless
@@ -34,13 +36,19 @@ Tripper-side `ExternalSensorSource` (Swift), enclosure, field ride.
 
 | Part | Role |
 |---|---|
-| Seeed XIAO ESP32-S3 | MCU, BLE 5.0, USB-C power |
+| Seeed XIAO ESP32-S3 | MCU, BLE 5.0, on-chip TWAI CAN controller |
 | DFRobot Gravity 10DOF (BNO055 + BMP280) | On-chip sensor fusion + barometer, I²C |
-| u-blox NEO-M8 GPS (GY-GPSU3 carrier) | 5 Hz position/speed/time, UART @ 115200 |
+| u-blox NEO-8M GPS (GYGPSV1 carrier) | 5 Hz position/speed/time, UART @ 115200 |
 | SSD1306 0.91" OLED 128×32 | Clock / live-data / bike-CAN screens + all status, I²C `0x3C` |
+| SN65HVD230 CAN transceiver | 3.3 V CAN PHY for the bike bus, D8/D9 |
 | 12 mm button | Screen step / auto-cycle toggle |
 | HW-483 button | Marker (click) / attitude zero (hold) |
-| SN65HVD230 CAN transceiver | 3.3 V CAN PHY for the bike bus, D8/D9 |
+| 5 V BEC (3 A) | Steps the bike's pack down to 5 V, feeds VUSB |
+
+No SD card, no LiPo, no power switch, no status LED — the phone is the
+recorder over BLE, the bike is the power source, and the OLED carries all
+status. Physically the ESP32, CAN module and sensor board live at the rear;
+the OLED, two buttons and GPS sit at the handlebar (GPS wants the sky view).
 
 ### Pin map (XIAO ESP32-S3)
 
@@ -63,12 +71,10 @@ Pin columns match the physical XIAO ESP32-S3 viewed from above, USB-C at
 the top:
 
 ```
-                      e-bike USB outlet / power bank
-                                  │
-                                  │ USB-C
-                      ┌───────────┴───────────┐
- n/c ─────────────────┤ D0                 5V ├─ n/c
- Screen button ○──────┤ D1                GND ├────────● GND rail
+                          USB-C (top edge) — flashing only
+                      ┌───────────────────────┐
+ n/c ─────────────────┤ D0                 5V ├──◄ BEC +5V ◄─ BEC 5V 3A ◄─ bike pack
+ Screen button ○──────┤ D1                GND ├────────● GND rail ◄ BEC GND
  Marker/Zero button ○─┤ D2                3V3 ├────────● 3V3 rail
  n/c ─────────────────┤ D3                D10 ├─ n/c
  SDA bus ●────────────┤ D4                 D9 ├──────◄ CAN CRX
@@ -91,6 +97,10 @@ the top:
 
 Wiring notes:
 
+- **Power comes from a 5 V BEC**, not USB. The BEC steps the bike's traction
+  pack down to 5 V / 3 A and feeds the XIAO's 5V (VUSB) pin. USB-C is only for
+  flashing — **never plug USB in while the BEC is powered**: both drive VUSB
+  and the two 5 V rails collide. Unplug one before the other.
 - **GPS UART is a crossover** — XIAO TX (D6) feeds the GPS **RX** pin and
   vice versa. If the firmware reports "no NMEA data", these two are swapped.
 - **Buttons need no resistors** — each connects its pin straight to GND;
@@ -235,21 +245,20 @@ kit that produced the decode.
 
 **Hardware:** a 3.3 V **SN65HVD230** transceiver on D8 (GPIO7 → CTX) and
 D9 (GPIO8 → CRX), CANH/CANL to the bike. Straight through, *not* a crossover
-like the GPS UART. No ground wire is needed in the CAN tap — the puck runs off
-the bike's USB outlet, which already ties the two grounds together. The
-ESP32-S3's own TWAI controller is the CAN peripheral, so the module is only a
-physical layer.
+like the GPS UART. No ground wire is needed in the CAN tap — the puck and the
+bike already share a ground through the BEC's negative rail. The ESP32-S3's own
+TWAI controller is the CAN peripheral, so the module is only a physical layer.
 
 **Remove the module's onboard 120 Ω terminator** (marked `121`, sitting across
 CANH/CANL). The bike's bus is already terminated at both ends and reads 60 Ω;
 a third resistor drops it to 40 Ω.
 
 **Never connect USB and the bike at once.** Once CANH/CANL are spliced in, the
-puck's ground *is* the bike's ground. Attaching a mains-earthed host ties the
-bike's battery negative to protective earth, and feeding the 5V pin while USB
-is attached back-feeds the bike's 5V into the host port — on the XIAO that pin
-is USB VBUS. Fit a 2-pin connector in the CANH/CANL run so unplugging to flash
-is one action. Read telemetry over BLE instead.
+puck's ground *is* the bike's ground (shared through the BEC). Attaching a
+mains-earthed host then ties the bike's battery negative to protective earth,
+and USB 5 V collides with the BEC's 5 V on VUSB. Fit a 2-pin connector in the
+CANH/CANL run, and either kill the BEC or unplug that connector before you
+flash. Read telemetry over BLE instead.
 
 **250 kbit/s, standard 11-bit IDs, 15 messages, ~92 frames/s.** Tap CAN_H and
 CAN_L at the controller. A healthy bus reads 60 Ω across the pair with the
