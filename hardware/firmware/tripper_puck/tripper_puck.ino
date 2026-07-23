@@ -6,17 +6,20 @@
 //
 //   100 Hz  BNO055 quaternion + linear accel (IMUPLUS), latch interval max-g
 //   5 Hz    GPS epochs (module pre-configured; re-configured at every boot)
-//   5 Hz    BLE telemetry notify (50-byte packed sample)
+//   5 Hz    BLE telemetry notify (70-byte packed sample)
 //   1 Hz    BLE status notify, baro sample, serial debug line
-//   2 Hz    OLED refresh — alternates every 5 s: GPS clock / live data
+//   2 Hz    OLED refresh — clock / live data / bike CAN (/ trip time)
+//   ~92/s   Talaria CAN frames, listen-only (SN65HVD230 on D8/D9)
 //
 // Status lives on the OLED (fix dot, link state, MARK/ZEROED splashes) —
 // no separate status LED.
-// Button (D1→GND): marker — bumps a counter in the telemetry packet.
-// Button 2 (D2→GND): click = hold/release the screen cycle (thin border =
-// held) · long-hold = zero roll/pitch/yaw at the mounted orientation —
-// reference quaternion saved to flash, survives reboots, and the BLE
-// telemetry quaternion is re-referenced the same way.
+// Button 1 (D1→GND): click = step to the next screen · 3 s hold = toggle
+// auto-cycling (thin border = cycling). Screens do NOT rotate on their own by
+// default — on a moving bike the screen you picked should stay put.
+// Button 2 (D2→GND): click = marker, bumps a counter in the telemetry packet ·
+// 10 s hold = zero roll/pitch/yaw at the mounted orientation — reference
+// quaternion saved to flash, survives reboots, and the BLE telemetry
+// quaternion is re-referenced the same way.
 // Control writes: 0x01 = marker ack flash · 0x02 = zero roll/pitch/yaw (same
 // as the button 2 long-hold, triggered from the app) · 0x03 = identify (LED
 // rainbow + OLED invert, for picking the right device in a scanner app) ·
@@ -34,14 +37,20 @@
 #include <TinyGPSPlus.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+#include <driver/twai.h>
 
 // ---------- pins & constants ----------
 #define PIN_BUTTON   D1
 #define PIN_BUTTON2  D2        // screen hold / attitude zero
+#define CAN_TX_GPIO  GPIO_NUM_7   // D8 -> SN65HVD230 CTX
+#define CAN_RX_GPIO  GPIO_NUM_8   // D9 <- SN65HVD230 CRX
+#define CAN_STALE_MS 2000UL       // no frame for this long = bus considered dead
 #define TZ_HOURS     3         // display offset for the clock screen (TRT, no DST)
-#define CLICK_MAX_MS 600       // release under this = a click (toggle hold)
+#define CLICK_MAX_MS 600       // release under this = a click, not a hold
 #define ZERO_SHOW_MS 800       // held past this = show the zero progress bar
-#define ZERO_HOLD_MS 10000UL   // held to here = capture the mount reference
+#define ZERO_HOLD_MS 10000UL   // button 2 held to here = capture the mount reference
+#define CYCLE_HOLD_MS 3000UL   // button 1 held to here = toggle auto-cycling
+#define SCREEN_MS    5000UL    // dwell per screen while auto-cycling
 
 static const char *SVC_UUID  = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70001";
 static const char *TELE_UUID = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70002";
@@ -66,8 +75,22 @@ struct __attribute__((packed)) TelemetryPacket {
   int16_t  linx_mg, liny_mg, linz_mg;   // linear accel, mg
   int16_t  maxG_mg;      // interval max |lin|, reset each packet
   uint8_t  marker;       // increments on each button press
+  // ---- bike CAN block (ver 0x02). Zeroed and canFlags bit0 clear when the
+  // bus is absent or stale, so the app must gate all of it on that bit.
+  uint8_t  canFlags;     // bit0 live · bit1 kickstand down · bits3:2 ride mode
+  uint16_t canSpeed_dkph;   // 0.1 km/h  (0x303[0:2])
+  uint16_t canRpm;          // rpm       (0x203[0:2])
+  uint16_t canPower_w;      // W         (0x203[2:4])
+  uint16_t canCurrent_da;   // 0.1 A     (0x302[4:6])
+  uint16_t canPack_dv;      // 0.1 V     (0x101[0:2])
+  uint8_t  canSoc_pct;      // %         (0x401[0])
+  uint16_t canDemand;       // throttle demand, units unconfirmed (0x202[3:5])
+  uint16_t cellHi_mv;       // mV        (0x201[0:2])
+  uint8_t  cellHi_idx;      // 1..16     (0x201[4])
+  uint16_t cellLo_mv;       // mV        (0x201[2:4])
+  uint8_t  cellLo_idx;      // 1..16     (0x201[5])
 };
-static_assert(sizeof(TelemetryPacket) == 50, "telemetry packet size drifted");
+static_assert(sizeof(TelemetryPacket) == 70, "telemetry packet size drifted");
 
 struct __attribute__((packed)) StatusPacket {
   uint8_t  ver;          // 0x01
@@ -92,7 +115,20 @@ TinyGPSCustom     gsvGP(gps, "GPGSV", 3), gsvGL(gps, "GLGSV", 3), gsvGB(gps, "GB
 NimBLECharacteristic *chTele = nullptr, *chStat = nullptr;
 NimBLEServer *bleServer = nullptr;
 
-bool imuOk = false, bmpOk = false, oledOk = false;
+bool imuOk = false, bmpOk = false, oledOk = false, canOk = false;
+
+// ---------- bike CAN (Talaria, 250 kbit/s, listen-only) ----------
+// Latest payload of each decoded message. Signal offsets and the evidence
+// behind every one of them live in tools/talaria.dbc.
+struct CanState {
+  uint8_t  f101[8], f201[8], f202[8], f203[8], f302[8], f303[8], f401[8];
+  uint32_t lastRxMs = 0;
+  uint32_t frames = 0;
+} canS;
+
+static inline uint16_t canU16(const uint8_t *d, int off) {
+  return (uint16_t)d[off] | ((uint16_t)d[off + 1] << 8);
+}
 
 // ---------- live state ----------
 volatile uint8_t markerCount = 0;
@@ -107,24 +143,28 @@ uint32_t maxLoopGapMs = 0, lastLoopAt = 0;   // worst single-iteration stall
 
 // Buttons are captured by pin-change ISRs so presses land even while the
 // loop is stalled (I2C timeout etc.); the loop only consumes the results.
-volatile uint32_t mkEdgeAt = 0;
-volatile bool     mkDown = false;
-volatile uint8_t  mkPresses = 0;        // presses not yet consumed
+// Both buttons discriminate click from hold the same way: the ISR timestamps
+// the press and only counts a click if the release lands inside CLICK_MAX_MS,
+// so a long hold never also registers as a click.
+volatile uint32_t b1FallAt = 0, b1EdgeAt = 0;
+volatile bool     b1Down = false;
+volatile uint8_t  b1Clicks = 0;         // button 1 short releases not yet consumed
 volatile uint32_t b2FallAt = 0, b2EdgeAt = 0;
 volatile bool     b2Down = false;
-volatile uint8_t  b2Clicks = 0;         // short-press releases not yet consumed
+volatile uint8_t  b2Clicks = 0;         // button 2 short releases not yet consumed
 volatile bool     bleZeroReq = false;   // 0x02 control write, consumed in loop()
 volatile bool     bleRideMsg = false;   // 0x04 control write latched below
 volatile uint8_t  bleRideActiveB = 0;
 volatile uint32_t bleRideElapsedS = 0;
 
-void IRAM_ATTR isrMarker() {
+void IRAM_ATTR isrBtn1() {
   uint32_t t = millis();
   bool dn = digitalRead(PIN_BUTTON) == LOW;
-  if (dn == mkDown || t - mkEdgeAt < 50) return;   // bounce
-  mkEdgeAt = t;
-  mkDown = dn;
-  if (dn) mkPresses++;
+  if (dn == b1Down || t - b1EdgeAt < 50) return;   // bounce
+  b1EdgeAt = t;
+  b1Down = dn;
+  if (dn) b1FallAt = t;
+  else if (t - b1FallAt < CLICK_MAX_MS) b1Clicks++;
 }
 
 void IRAM_ATTR isrBtn2() {
@@ -137,11 +177,16 @@ void IRAM_ATTR isrBtn2() {
   else if (t - b2FallAt < CLICK_MAX_MS) b2Clicks++;
 }
 
-// screen hold + mount-zero (button 2)
+// screens (button 1) + mount-zero (button 2)
 Preferences prefs;
 imu::Quaternion qRef;                   // mount reference; identity until zeroed
-bool screenHold = false;
-int  heldScreen = 0;
+// Screens no longer rotate on their own. Button 1 steps through them; a 3 s
+// hold hands the stepping back to a timer. Manual is the default because on a
+// moving bike you want the screen you chose to stay put.
+int  screenIdx = 0;
+bool autoCycle = false;
+uint32_t tCycle = 0;
+bool cycleFired = false;
 bool rideActive = false;                // phone is recording: invert + trip screen
 uint32_t tripStartMs = 0;               // millis() epoch of the ride (elapsed-adjusted)
 uint32_t zeroSplashUntil = 0;
@@ -404,6 +449,44 @@ void drawTripScreen(uint32_t now) {
   }
 }
 
+bool canLive(uint32_t now) {
+  return canOk && canS.lastRxMs && now - canS.lastRxMs < CAN_STALE_MS;
+}
+
+void drawCanScreen(uint32_t now) {
+  if (!canLive(now)) {
+    oled.setTextSize(1);
+    oled.setCursor(22, 6);
+    oled.print("BIKE CAN BUS");
+    oled.setCursor(31, 18);
+    oled.print(canOk ? "no data" : "off");
+    return;
+  }
+  uint8_t st = canS.f202[0];
+  uint8_t mode = (st >> 4) & 3;
+
+  // top strip: ride mode left, kickstand right
+  oled.setTextSize(1);
+  oled.setCursor(0, 0);
+  oled.print(mode == 1 ? "Eco" : mode == 2 ? "Sport" : "?");
+  oled.setCursor(86, 0);
+  oled.print((st >> 7) & 1 ? "KICK DN" : "KICK UP");
+  oled.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+
+  // hero: bike speed (not GPS — this is the wheel's own number)
+  oled.setTextSize(2);
+  oled.setCursor(0, 13);
+  oled.printf("%4.1f", canU16(canS.f303, 0) / 10.0f);
+  oled.setTextSize(1);
+  oled.setCursor(50, 20);
+  oled.print("km/h");
+
+  // battery percentage, right
+  oled.setTextSize(2);
+  oled.setCursor(80, 13);
+  oled.printf("%3u%%", canS.f401[0]);
+}
+
 void drawMarkerSplash() {
   oled.fillRect(0, 0, 128, 32, SSD1306_WHITE);
   oled.setTextColor(SSD1306_BLACK);
@@ -430,6 +513,9 @@ void drawZeroedSplash() {
   oled.print("ZEROED");
 }
 
+// clock · data · CAN, plus trip time while the app says a ride is recording.
+int screenCount() { return rideActive ? 4 : 3; }
+
 void refreshOled(uint32_t now) {
   oled.clearDisplay();
   oled.setTextColor(SSD1306_WHITE);
@@ -438,13 +524,14 @@ void refreshOled(uint32_t now) {
   else if (now < zeroSplashUntil)   drawZeroedSplash();
   else if (now < splashUntil)       drawMarkerSplash();
   else {
-    int screens = rideActive ? 3 : 2;   // 5 s each: clock / data (/ trip time)
-    int idx = screenHold ? heldScreen : (int)((now / 5000) % screens);
-    if (idx >= screens) idx %= screens; // held trip screen after the ride ends
+    int idx = screenIdx;
+    if (idx >= screenCount()) idx = 0;  // trip screen vanished when the ride ended
     if (idx == 0)      drawClockScreen(now);
     else if (idx == 1) drawDataScreen(now);
+    else if (idx == 2) drawCanScreen(now);
     else               drawTripScreen(now);
-    if (screenHold) oled.drawRect(0, 0, 128, 32, SSD1306_WHITE);  // border = pinned
+    // Border marks the unusual state: the screens are stepping on their own.
+    if (autoCycle) oled.drawRect(0, 0, 128, 32, SSD1306_WHITE);
   }
   // recording inverts the whole display; identify blinks relative to that
   oled.invertDisplay(rideActive != (now < identifyUntil));
@@ -454,6 +541,44 @@ void refreshOled(uint32_t now) {
 }
 
 // ---------- setup ----------
+// Listen-only: the controller never transmits and never even ACKs, so the
+// puck cannot influence the bike's bus whatever this firmware does. Failure
+// here is non-fatal — the puck is a GPS/IMU logger first and must still boot
+// and stream if the transceiver is unplugged.
+bool canBringup() {
+  twai_general_config_t g =
+      TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_GPIO, CAN_RX_GPIO, TWAI_MODE_LISTEN_ONLY);
+  g.rx_queue_len = 32;                  // ~92 frames/s; drained every loop pass
+  g.alerts_enabled = TWAI_ALERT_NONE;   // nothing here reacts to alerts
+  twai_timing_config_t t = TWAI_TIMING_CONFIG_250KBITS();
+  twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+  if (twai_driver_install(&g, &t, &f) != ESP_OK) return false;
+  if (twai_start() != ESP_OK) { twai_driver_uninstall(); return false; }
+  return true;
+}
+
+// Drain whatever the controller has queued. Bounded so a burst can never
+// stretch a loop iteration — the same reason the buttons sit on ISRs.
+void canPoll() {
+  if (!canOk) return;
+  twai_message_t m;
+  for (int i = 0; i < 16 && twai_receive(&m, 0) == ESP_OK; i++) {
+    if (m.extd || m.rtr || m.data_length_code < 8) continue;
+    switch (m.identifier) {
+      case 0x101: memcpy(canS.f101, m.data, 8); break;
+      case 0x201: memcpy(canS.f201, m.data, 8); break;
+      case 0x202: memcpy(canS.f202, m.data, 8); break;
+      case 0x203: memcpy(canS.f203, m.data, 8); break;
+      case 0x302: memcpy(canS.f302, m.data, 8); break;
+      case 0x303: memcpy(canS.f303, m.data, 8); break;
+      case 0x401: memcpy(canS.f401, m.data, 8); break;
+      default: continue;                // other IDs are undecoded, ignore
+    }
+    canS.lastRxMs = millis();
+    canS.frames++;
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   // Never let debug prints block the loop: with a half-open USB CDC (host
@@ -465,7 +590,7 @@ void setup() {
 
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_BUTTON2, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), isrMarker, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), isrBtn1, CHANGE);
   attachInterrupt(digitalPinToInterrupt(PIN_BUTTON2), isrBtn2, CHANGE);
 
   prefs.begin("puck", false);           // load the mount reference, if ever zeroed
@@ -490,7 +615,13 @@ void setup() {
   Serial.printf("GPS %s (115200/5Hz)%s\n", gpsOk ? "ok" : "NOT RESPONDING",
                 gpsReconfigured ? " — was at 9600 factory: BBR lost, check backup cell" : "");
 
+  canOk = canBringup();
+  Serial.printf("CAN %s (250k listen-only, D8/D9)\n", canOk ? "ok" : "FAIL");
+
   NimBLEDevice::init("Tripper-DL1");
+  // The telemetry packet is 70 B, so the link must land above the 23 B default
+  // ATT MTU. iOS negotiates 185 B; this just states the requirement explicitly.
+  NimBLEDevice::setMTU(247);
   // Full TX power: phone logs showed supervision timeouts every few minutes
   // at the default level. The link crosses a bike frame and a rider's body
   // to a pocketed phone — margin matters more than the ~20 mW it costs.
@@ -541,25 +672,44 @@ void loop() {
   lastLoopAt = now;
 
   while (Serial1.available()) gps.encode(Serial1.read());
+  canPoll();
 
   // buttons: edges were latched by the ISRs — just consume them here
-  if (mkPresses) {
+  // button 1: click steps the screen, 3 s hold toggles auto-cycling
+  if (b1Clicks) {
     noInterrupts();
-    uint8_t n = mkPresses; mkPresses = 0;
+    uint8_t n = b1Clicks; b1Clicks = 0;
+    interrupts();
+    screenIdx = (screenIdx + n) % screenCount();
+    tCycle = now;                       // a manual step earns a full dwell
+    tOled = 0;
+    Serial.printf("[screen] %d/%d\n", screenIdx, screenCount());
+  }
+  static bool b1Prev = false;
+  if (b1Down && !b1Prev) cycleFired = false;       // new press = fresh hold
+  b1Prev = b1Down;
+  if (b1Down && !cycleFired && now - b1FallAt >= CYCLE_HOLD_MS) {
+    cycleFired = true;
+    autoCycle = !autoCycle;
+    tCycle = now;
+    tOled = 0;
+    Serial.printf("[screen] auto-cycle %s\n", autoCycle ? "on" : "off");
+  }
+  if (autoCycle && now - tCycle >= SCREEN_MS) {
+    tCycle = now;
+    screenIdx = (screenIdx + 1) % screenCount();
+    tOled = 0;
+  }
+
+  // button 2: click drops a marker, long hold zeroes the mount reference
+  if (b2Clicks) {
+    noInterrupts();
+    uint8_t n = b2Clicks; b2Clicks = 0;
     interrupts();
     markerCount += n;
     splashUntil = now + 800;
     tOled = 0;                          // redraw immediately with the splash
     Serial.printf("[marker] #%d\n", markerCount);
-  }
-  if (b2Clicks) {
-    noInterrupts();
-    uint8_t n = b2Clicks; b2Clicks = 0;
-    interrupts();
-    if (n & 1) screenHold = !screenHold;
-    if (screenHold) heldScreen = (int)((now / 5000) % (rideActive ? 3 : 2));
-    tOled = 0;
-    Serial.printf("[screen] %s\n", screenHold ? "held" : "cycling");
   }
   static bool b2Prev = false;
   if (b2Down && !b2Prev) zeroFired = false;        // new press = fresh hold
@@ -604,7 +754,7 @@ void loop() {
   if (now - tTele >= 200) {
     tTele = now;
     TelemetryPacket p = {};
-    p.ver = 0x01;
+    p.ver = 0x02;                       // 0x01 was the 50-byte, pre-CAN packet
     p.flags = (fixValid() ? 1 : 0) | (gps.time.isValid() ? 2 : 0);
     p.gpsTimeMs = gps.time.isValid()
         ? (uint32_t)gps.time.hour() * 3600000UL + (uint32_t)gps.time.minute() * 60000UL +
@@ -630,6 +780,28 @@ void loop() {
     p.maxG_mg = (int16_t)(maxG_g * 1000);
     p.marker = markerCount;
     maxG_g = 0;
+
+    // Bike CAN. The whole block stays zero unless a frame arrived recently, so
+    // a disconnected transceiver or a sleeping bike reads as "absent" rather
+    // than as a stale speed the app would happily plot.
+    if (canOk && canS.lastRxMs && now - canS.lastRxMs < CAN_STALE_MS) {
+      uint8_t st = canS.f202[0];
+      p.canFlags = 0x01 |                          // live
+                   (((st >> 7) & 1) << 1) |        // kickstand down
+                   (((st >> 4) & 3) << 2);         // ride mode: 1 Eco, 2 Sport
+      p.canSpeed_dkph = canU16(canS.f303, 0);
+      p.canRpm        = canU16(canS.f203, 0);
+      p.canPower_w    = canU16(canS.f203, 2);
+      p.canCurrent_da = canU16(canS.f302, 4);
+      p.canPack_dv    = canU16(canS.f101, 0);
+      p.canSoc_pct    = canS.f401[0];
+      p.canDemand     = canU16(canS.f202, 3);
+      p.cellHi_mv     = canU16(canS.f201, 0);
+      p.cellHi_idx    = canS.f201[4];
+      p.cellLo_mv     = canU16(canS.f201, 2);
+      p.cellLo_idx    = canS.f201[5];
+    }
+
     chTele->setValue((uint8_t *)&p, sizeof(p));
     if (bleServer->getConnectedCount() > 0) chTele->notify();
   }
@@ -658,10 +830,14 @@ void loop() {
     // btn: raw pin levels (1 = idle/high, 0 = pressed/low — 0 while unpressed
     // means the line is stuck) · lps: main-loop iterations since last line
     // (drops from tens of thousands to single digits when something blocks)
-    Serial.printf("[dbg] fix=%d sats=%d view=%d conn=%d R=%+.1f P=%+.1f qW=%.3f baro=%.1fm mark=%d btn=%d%d lps=%lu stall=%lu\n",
+    bool canLive = canOk && canS.lastRxMs && now - canS.lastRxMs < CAN_STALE_MS;
+    Serial.printf("[dbg] fix=%d sats=%d view=%d conn=%d R=%+.1f P=%+.1f qW=%.3f baro=%.1fm mark=%d btn=%d%d lps=%lu stall=%lu can=%s/%lu %u%% %.1fV\n",
                   s.fix, s.sats, satsInView(), bleServer->getConnectedCount(),
                   dbgR, dbgP, lastQuat.w(), lastBaroAlt, markerCount,
-                  digitalRead(PIN_BUTTON), digitalRead(PIN_BUTTON2), loopsPerSec, maxLoopGapMs);
+                  digitalRead(PIN_BUTTON), digitalRead(PIN_BUTTON2), loopsPerSec, maxLoopGapMs,
+                  canLive ? "live" : (canOk ? "idle" : "off"), (unsigned long)canS.frames,
+                  canLive ? canS.f401[0] : 0,
+                  canLive ? canU16(canS.f101, 0) / 10.0f : 0.0f);
     loopsPerSec = 0;
     maxLoopGapMs = 0;
   }

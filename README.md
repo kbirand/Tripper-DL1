@@ -5,7 +5,8 @@ A matchbox-sized BLE telemetry puck for e-bikes — companion hardware for the
 on-chip-fused IMU orientation, and barometric data to the phone over
 Bluetooth LE; the app records, analyzes, and exports. The puck itself is
 stateless: it powers from the bike's USB, boots in seconds, and needs no
-interaction beyond a marker button.
+interaction beyond a marker button. It also reads the bike's own CAN bus
+listen-only, adding battery, drivetrain and rider-control data to the stream.
 
 **Status:** bench-complete and phone-verified (2026-07-21). Remaining:
 Tripper-side `ExternalSensorSource` (Swift), enclosure, field ride.
@@ -20,8 +21,10 @@ Tripper-side `ExternalSensorSource` (Swift), enclosure, field ride.
   in the app) and the current orientation becomes 0/0/0 (reference quaternion,
   persisted to flash, survives reboots, applied to both display and telemetry)
 - **Ride awareness** — while the app records, the OLED runs inverted and a
-  trip-time screen joins the cycle; the state re-syncs on every reconnect, so
-  link flaps and mid-ride reboots heal themselves
+  trip-time screen joins the rotation; the state re-syncs on every reconnect,
+  so link flaps and mid-ride reboots heal themselves
+- **Reads the bike** — listen-only CAN gives battery percentage, pack voltage,
+  cell balance, motor current and rider controls without touching the bus
 
 ## Hardware
 
@@ -30,19 +33,21 @@ Tripper-side `ExternalSensorSource` (Swift), enclosure, field ride.
 | Seeed XIAO ESP32-S3 | MCU, BLE 5.0, USB-C power |
 | DFRobot Gravity 10DOF (BNO055 + BMP280) | On-chip sensor fusion + barometer, I²C |
 | u-blox NEO-M8 GPS (GY-GPSU3 carrier) | 5 Hz position/speed/time, UART @ 115200 |
-| SSD1306 0.91" OLED 128×32 | Clock / live-data screens + all status, I²C `0x3C` |
-| 12 mm button | Marker (glove-friendly) |
-| HW-483 button | Screen hold / attitude zero |
+| SSD1306 0.91" OLED 128×32 | Clock / live-data / bike-CAN screens + all status, I²C `0x3C` |
+| 12 mm button | Screen step / auto-cycle toggle |
+| HW-483 button | Marker (click) / attitude zero (hold) |
+| SN65HVD230 CAN transceiver | 3.3 V CAN PHY for the bike bus, D8/D9 |
 
 ### Pin map (XIAO ESP32-S3)
 
 | Pin | Function |
 |---|---|
-| D1 | Marker button → GND (internal pull-up) |
-| D2 | Hold/zero button → GND (internal pull-up) |
+| D1 | Screen button → GND (internal pull-up) |
+| D2 | Marker/zero button → GND (internal pull-up) |
 | D4 / D5 | I²C SDA / SCL — BNO055 `0x28`, BMP280 `0x76`, OLED `0x3C` @ 100 kHz |
 | D6 / D7 | UART TX→GPS RX / RX←GPS TX @ 115200 |
-| D0, D3, D8–D10 | free |
+| D8 / D9 | CAN TX→CTX / RX←CRX (SN65HVD230), 250 kbit/s listen-only |
+| D0, D3, D10 | free |
 
 The I²C bus **must run at 100 kHz** — the BNO055's clock-stretching upsets
 ESP32 I²C at higher speeds (validated: 59,722 reads / 0 errors / 10 min).
@@ -59,11 +64,11 @@ the top:
                                   │ USB-C
                       ┌───────────┴───────────┐
  n/c ─────────────────┤ D0                 5V ├─ n/c
- Marker button ○──────┤ D1                GND ├────────● GND rail
- Hold/Zero button ○───┤ D2                3V3 ├────────● 3V3 rail
+ Screen button ○──────┤ D1                GND ├────────● GND rail
+ Marker/Zero button ○─┤ D2                3V3 ├────────● 3V3 rail
  n/c ─────────────────┤ D3                D10 ├─ n/c
- SDA bus ●────────────┤ D4                 D9 ├─ n/c
- SCL bus ●────────────┤ D5                 D8 ├─ n/c
+ SDA bus ●────────────┤ D4                 D9 ├──────◄ CAN CRX
+ SCL bus ●────────────┤ D5                 D8 ├──────► CAN CTX
  to GPS RX ◄──────────┤ D6 (TX)       (RX) D7 ├──────◄ from GPS TX
                       └───────────────────────┘
                             XIAO ESP32-S3
@@ -75,8 +80,9 @@ the top:
  ● GND rail ─┬─ Gravity 10DOF GND (black)                   └─ OLED SCK
              ├─ GPS GND
              ├─ OLED GND
-             ├─ Marker button ○ (2nd leg)
-             └─ Hold/Zero button ○ (2nd leg)
+             ├─ CAN module GND
+             ├─ Screen button ○ (2nd leg)
+             └─ Marker/Zero button ○ (2nd leg)
 ```
 
 Wiring notes:
@@ -108,6 +114,7 @@ Arduino sketches in [`hardware/firmware/`](hardware/firmware/):
 | [`i2c_diag`](hardware/firmware/i2c_diag/) | Wiring diagnostic — line states + normal/swapped bus scans |
 | [`gps_config_5hz`](hardware/firmware/gps_config_5hz/) | One-time GPS config: 5 Hz + 115200, saved to BBR (production firmware re-applies at boot) |
 | [`gps_revert_factory`](hardware/firmware/gps_revert_factory/) | Test harness — reverts the GPS to 9600/1 Hz factory defaults (simulates a power cycle with a dead backup cell) to exercise `gpsBringup()`'s recovery path |
+| [`can_probe`](hardware/firmware/can_probe/) | CAN bring-up — decoded dashboard on the OLED and over BLE (`Tripper-CAN`, Nordic UART). Reports wirelessly on purpose: the bike and a USB host must never be connected at once |
 
 ### Build & flash
 
@@ -124,15 +131,26 @@ arduino-cli upload  --fqbn esp32:esp32:XIAO_ESP32S3 -p /dev/cu.usbmodem* .
 
 | Input | Action |
 |---|---|
-| Marker button (D1) click | Marker counter++ in telemetry · MARK splash |
-| Hold button (D2) click | Pin / unpin the current OLED screen (border = pinned) |
-| Hold button (D2) 10 s hold | Zero roll/pitch/yaw at current orientation (progress bar → ZEROED) |
+| Screen button (D1) click | Step to the next OLED screen |
+| Screen button (D1) 3 s hold | Toggle auto-cycling (thin border = cycling) |
+| Marker button (D2) click | Marker counter++ in telemetry · MARK splash |
+| Marker button (D2) 10 s hold | Zero roll/pitch/yaw at current orientation (progress bar → ZEROED) |
 
-All status lives on the OLED, which alternates every 5 s between a GPS
-clock screen (UTC+3) and a data screen (speed hero, roll/pitch,
-satellites, g, fix dot, link state). While the app is recording a ride the
-display runs inverted and a third screen joins the cycle: the trip time
-(app-authoritative, so it tracks pauses and survives reconnects).
+All status lives on the OLED. **Screens do not rotate on their own** — on a
+moving bike the screen you picked should stay put, so D1 steps through them
+and only a 3 s hold hands the stepping back to a 5 s timer (thin border while
+it does). Three screens normally:
+
+1. **Clock** — GPS time, UTC+3
+2. **Data** — GPS speed hero, roll/pitch, satellites, g, fix dot, link state
+3. **Bike CAN** — wheel speed hero, battery percentage, ride mode, kickstand;
+   reads `no data` when no CAN frame has arrived in 2 s, `off` if the TWAI
+   controller never came up
+
+While the app is recording a ride the display runs inverted and a fourth
+screen joins: the trip time (app-authoritative, so it tracks pauses and
+survives reconnects). It disappears when the ride ends, and the screen index
+falls back to the clock if it was showing.
 
 ## BLE protocol
 
@@ -141,15 +159,15 @@ Device name `Tripper-DL1`. One service, three characteristics:
 | UUID | Char | Direction |
 |---|---|---|
 | `8E7C1A20-0F5A-4B9C-9C90-54B1D2A70001` | *service* | |
-| `…0002` | telemetry | notify + read, 5 Hz, 50 B |
+| `…0002` | telemetry | notify + read, 5 Hz, 70 B |
 | `…0003` | status | notify + read, 1 Hz, 14 B |
 | `…0004` | control | write / write-no-response |
 
-### Telemetry packet (50 bytes, little-endian, packed)
+### Telemetry packet (70 bytes, little-endian, packed)
 
 | Offset | Type | Field | Notes |
 |---|---|---|---|
-| 0 | u8 | ver | `0x01` |
+| 0 | u8 | ver | `0x02` — `0x01` was the 50-byte pre-CAN packet |
 | 1 | u8 | flags | bit0 fix valid · bit1 time valid |
 | 2 | u32 | gpsTimeMs | UTC ms-of-day, `0xFFFFFFFF` if invalid |
 | 6 | i32 | lat_e7 | degrees × 1e7 |
@@ -165,6 +183,29 @@ Device name `Tripper-DL1`. One service, three characteristics:
 | 41 | i16×3 | lin x y z | linear accel, mg (sensor frame) |
 | 47 | i16 | maxG_mg | interval max \|lin\|, resets each packet |
 | 49 | u8 | marker | increments per button press |
+| 50 | u8 | canFlags | bit0 live · bit1 kickstand down · bits3:2 ride mode (1 Eco, 2 Sport) |
+| 51 | u16 | canSpeed_dkph | 0.1 km/h |
+| 53 | u16 | canRpm | motor rpm |
+| 55 | u16 | canPower_w | watts |
+| 57 | u16 | canCurrent_da | 0.1 A |
+| 59 | u16 | canPack_dv | 0.1 V |
+| 61 | u8 | canSoc_pct | battery percentage |
+| 62 | u16 | canDemand | throttle demand, units unconfirmed |
+| 64 | u16 | cellHi_mv | highest cell, mV |
+| 66 | u8 | cellHi_idx | its index, 1–16 |
+| 67 | u16 | cellLo_mv | lowest cell, mV |
+| 69 | u8 | cellLo_idx | its index, 1–16 |
+
+Bytes 50–69 are the bike's CAN bus, read listen-only from a SN65HVD230 on
+D8/D9 (see [Bike CAN bus](#bike-can-bus-talaria)). **The whole block is zeroed
+and `canFlags` bit0 is clear whenever no frame has arrived in the last 2 s** —
+transceiver unplugged, bike asleep, or bus fault. Gate every CAN field on that
+bit rather than trusting a zero speed, or a parked bike and a disconnected
+cable look identical.
+
+Note `speed_cmps` at offset 26 is GPS ground speed in cm/s; `canSpeed_dkph`
+at 51 is the bike's own wheel speed in 0.1 km/h. They are independent
+measurements and will disagree — wheelspin, GPS lag, tyre circumference.
 
 ### Status packet (14 bytes)
 
@@ -182,10 +223,29 @@ uptime_s u32 · temp_x10 i16 · marker u8 · reserved u8`
 
 ## Bike CAN bus (Talaria)
 
-Exploratory, not yet wired into the firmware. The bike's own CAN bus carries
-battery and drivetrain data the puck's sensors can't see — pack voltage, cell
-balance, motor current, state of charge. [`tools/`](tools/) holds the
-bring-up and reverse-engineering kit.
+The bike's own CAN bus carries battery and drivetrain data the puck's sensors
+can't see — pack voltage, cell balance, motor current, state of charge. The
+production firmware reads it listen-only and appends it to the BLE telemetry
+packet; [`tools/`](tools/) holds the host-side bring-up and reverse-engineering
+kit that produced the decode.
+
+**Hardware:** a 3.3 V **SN65HVD230** transceiver on D8 (GPIO7 → CTX) and
+D9 (GPIO8 → CRX), CANH/CANL to the bike. Straight through, *not* a crossover
+like the GPS UART. No ground wire is needed in the CAN tap — the puck runs off
+the bike's USB outlet, which already ties the two grounds together. The
+ESP32-S3's own TWAI controller is the CAN peripheral, so the module is only a
+physical layer.
+
+**Remove the module's onboard 120 Ω terminator** (marked `121`, sitting across
+CANH/CANL). The bike's bus is already terminated at both ends and reads 60 Ω;
+a third resistor drops it to 40 Ω.
+
+**Never connect USB and the bike at once.** Once CANH/CANL are spliced in, the
+puck's ground *is* the bike's ground. Attaching a mains-earthed host ties the
+bike's battery negative to protective earth, and feeding the 5V pin while USB
+is attached back-feeds the bike's 5V into the host port — on the XIAO that pin
+is USB VBUS. Fit a 2-pin connector in the CANH/CANL run so unplugging to flash
+is one action. Read telemetry over BLE instead.
 
 **250 kbit/s, standard 11-bit IDs, 15 messages, ~92 frames/s.** Tap CAN_H and
 CAN_L at the controller. A healthy bus reads 60 Ω across the pair with the

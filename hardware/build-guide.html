@@ -290,6 +290,13 @@
           </tr>
           <tr class="got">
             <td><span class="pill got">Obtained</span></td>
+            <td><b>SN65HVD230 CAN module</b><span class="got-note">Alkatronik / Hepsiburada · 2026-07-23</span></td>
+            <td><b>Reads the bike's own CAN bus</b> — 3.3 V transceiver, no level shifting. The ESP32-S3's built-in TWAI controller is the CAN peripheral; this is only the physical layer.</td>
+            <td><a href="https://www.hepsiburada.com/alkatronik-sn65hvd230-can-modulu-p-HBCV00000FDLXI">Hepsiburada</a></td>
+            <td class="num">₺60–120</td>
+          </tr>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
             <td><b>Consumables</b>: silicone wire 28 AWG, heat-shrink, JST leads, 2 mm foam pad<span class="got-note">2026-07-11</span></td>
             <td>Wiring + vibration isolation</td>
             <td>any hobby shop</td>
@@ -362,7 +369,7 @@
   <section>
     <div class="sec-head">
       <h2>Wiring map</h2>
-      <p>Everything is 3.3 V logic — no level shifters. Three buses, two GPIOs, done.</p>
+      <p>Everything is 3.3 V logic — no level shifters. Three buses (I²C, GPS UART, bike CAN), two buttons, done.</p>
     </div>
     <div class="tablewrap">
       <table>
@@ -372,10 +379,12 @@
           <tr><td class="mono">D5</td><td class="mono">GPIO6</td><td>10DOF <span class="mono">SCL</span> (Gravity green) + OLED <span class="mono">SCK</span></td><td>I²C clock — <b>run at 100 kHz</b>, see below (400 kHz burst for OLED frames only)</td></tr>
           <tr><td class="mono">D6 (TX)</td><td class="mono">GPIO43</td><td>GPS <span class="mono">RX</span></td><td>UART 9600→115200 baud</td></tr>
           <tr><td class="mono">D7 (RX)</td><td class="mono">GPIO44</td><td>GPS <span class="mono">TX</span></td><td>UART (NMEA / UBX in)</td></tr>
-          <tr><td class="mono">D1</td><td class="mono">GPIO2</td><td>Marker button → GND</td><td>Input, internal pull-up — 12 mm glove button in the final case</td></tr>
-          <tr><td class="mono">D2</td><td class="mono">GPIO3</td><td>Hold/zero button → GND (HW-483)</td><td>Click = pin screen · long-hold = zero attitude (saved to NVS)</td></tr>
+          <tr><td class="mono">D1</td><td class="mono">GPIO2</td><td>Screen button → GND</td><td>Input, internal pull-up — 12 mm glove button. Click = next screen · 3 s hold = toggle auto-cycling</td></tr>
+          <tr><td class="mono">D2</td><td class="mono">GPIO3</td><td>Marker/zero button → GND (HW-483)</td><td>Click = marker · 10 s hold = zero attitude (saved to NVS)</td></tr>
+          <tr><td class="mono">D8</td><td class="mono">GPIO7</td><td>SN65HVD230 <span class="mono">CTX</span></td><td>CAN TX — straight through, <b>not</b> a crossover like the GPS UART</td></tr>
+          <tr><td class="mono">D9</td><td class="mono">GPIO8</td><td>SN65HVD230 <span class="mono">CRX</span></td><td>CAN RX — 250 kbit/s, listen-only (ESP32-S3 TWAI controller)</td></tr>
           <tr><td class="mono">D0</td><td class="mono">GPIO1</td><td><em>free</em></td><td>NeoPixel dropped 2026-07-21 — the OLED carries all status</td></tr>
-          <tr><td class="mono">D3, D8–D10</td><td class="mono">—</td><td><em>free</em> (former SD pins)</td><td>e-bike edition: no SD</td></tr>
+          <tr><td class="mono">D3, D10</td><td class="mono">—</td><td><em>free</em> (former SD pins)</td><td>e-bike edition: no SD</td></tr>
           <tr><td class="mono">USB-C</td><td>—</td><td>E-bike USB outlet / power bank</td><td>Power — no battery; the puck boots with the bike</td></tr>
           <tr><td class="mono">3V3 / GND</td><td>—</td><td>All module VCC / GND</td><td>Power rails</td></tr>
         </tbody>
@@ -393,6 +402,55 @@
     <div class="note warn">
       <b>Antenna rule (this decides your GPS quality)</b>
       Mount the GPS patch antenna at the top of the enclosure, facing the sky, at least 15 mm away from the ESP32 module — its RF noise degrades GPS reception. If the module has a u.fl connector, route the antenna to the lid.
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section>
+    <div class="sec-head">
+      <h2>Bike CAN bus</h2>
+      <p>The bike broadcasts everything the puck's own sensors can't see — pack voltage, per-cell balance, motor current, state of charge, rider controls. Reading it costs one 3.3 V transceiver and two wires.</p>
+    </div>
+
+    <div class="note warn">
+      <b>Never connect USB and the bike at the same time</b>
+      Once <span class="mono">CANH</span>/<span class="mono">CANL</span> are spliced in, the puck's ground <em>is</em> the bike's ground. Attaching a mains-earthed computer ties the traction battery's negative to protective earth through your machine. Worse, feeding the <span class="mono">5V</span> pin while USB is attached back-feeds the bike's 5 V rail into the host port — on the XIAO that pin is USB VBUS with nothing in between, and it can kill the port.<br><br>
+      Fit a <b>2-pin connector</b> in the CANH/CANL run so unplugging to flash is one action. Read telemetry over BLE instead of serial — the puck is a BLE device; use what it already does.
+    </div>
+
+    <div class="note warn">
+      <b>Remove the module's 120 Ω terminator before you connect it</b>
+      Nearly every SN65HVD230 breakout carries a terminating resistor across CANH/CANL — on the Alkatronik board it is the SMD part marked <span class="mono">121</span> sitting between the two CAN pads. ISO 11898-2 puts 120 Ω only at the two <em>ends</em> of a bus, and the bike is already terminated at both: measure across the pair with the bike <b>off</b> and you get <b>60 Ω</b>. Adding a third resistor makes it 40 Ω, which degrades reception and throws errors on a bus you do not own.<br><br>
+      Desolder it (or crush it — nothing else shares that net), then confirm the module reads <b>open</b> across CANH/CANL before wiring it in.
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Module pin</th><th>Goes to</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">3V3</td><td>3V3 rail</td><td>3.3 V part — this is why it suits the ESP32 and an MCP2551 does not</td></tr>
+          <tr><td class="mono">GND</td><td>GND rail</td><td>—</td></tr>
+          <tr><td class="mono">CTX</td><td class="mono">D8</td><td><b>Straight through, not crossed.</b> CTX is the transceiver's <em>input</em></td></tr>
+          <tr><td class="mono">CRX</td><td class="mono">D9</td><td>CRX is its <em>output</em></td></tr>
+          <tr><td class="mono">CANH</td><td>bike CAN_H</td><td>Idles ~2.5 V; reads slightly <b>higher</b> than CAN_L on a DMM while traffic flows</td></tr>
+          <tr><td class="mono">CANL</td><td>bike CAN_L</td><td>Swapping H/L is harmless — you simply get zero frames. Just swap back</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note">
+      <b>No ground wire in the CAN tap</b>
+      Only two wires reach the bike harness. The puck runs off the bike's USB outlet, which already ties the two grounds together — a third wire would just add a redundant loop. This is also why a laptop on mains is such a problem: it introduces a <em>second</em> ground path.
+    </div>
+
+    <div class="note">
+      <b>Listen-only, in firmware and by intent</b>
+      The ESP32-S3's TWAI controller runs in <span class="mono">TWAI_MODE_LISTEN_ONLY</span>: it never transmits and never even ACKs, so no firmware bug can disturb the bike's controller. Bring-up is non-fatal — if the transceiver is unplugged the puck still boots and streams GPS/IMU exactly as before, and the CAN block in the telemetry packet stays zeroed with its <em>live</em> bit clear.
+    </div>
+
+    <div class="note">
+      <b>The bus, once you find it</b>
+      250 kbit/s, standard 11-bit IDs, 15 messages, ~92 frames/s. Signal decodes and the evidence behind each one live in <span class="mono">tools/talaria.dbc</span>; <span class="mono">tools/can_sniff.py</span> is the host-side kit that produced them. Three fields look like something they are not — <span class="mono">0x103[0]</span> is state of <em>health</em> (pinned at 100), <span class="mono">0x202[6:8]</span> is a free-running counter and <b>not</b> an odometer, and <span class="mono">0x490[0]</span> tracks ride mode rather than temperature. No odometer was found on the bus.
     </div>
   </section>
 
@@ -502,8 +560,10 @@ AUTO-PAUSED→ RECORDING   when speed &gt; 2 m/s again (new file segment? no —
 any state  → CLOSED      on power switch off (flush + close in the
                           brown-out grace window — flush often!)</code></pre>
 
-    <h3>Marker button</h3>
-    <p>GPIO interrupt with 50 ms debounce. Short press: write a marker event (row gets <span class="mono">sync</span> in the marker column) + blue LED flash. Long press (2 s): manual start/stop override for parking-lot testing.</p>
+    <h3>Buttons</h3>
+    <p>Both sit on pin-change ISRs with 50 ms debounce, so presses land even while the loop is stalled. Each discriminates click from hold the same way: the ISR timestamps the press and counts a click only if the release lands inside 600 ms, so a long hold never also fires a click.</p>
+    <p><b>D1 (12 mm glove button)</b> — click steps to the next OLED screen · 3 s hold toggles auto-cycling. Screens do <em>not</em> rotate on their own by default: on a moving bike the screen you picked should stay put.</p>
+    <p><b>D2 (HW-483)</b> — click drops a marker into the telemetry packet · 10 s hold zeroes roll/pitch/yaw and saves the reference quaternion to NVS.</p>
 
     <h3>LED states</h3>
     <p style="display:flex; flex-wrap:wrap; gap:18px; margin-top:10px;">
