@@ -1,5 +1,9 @@
 # Tripper Puck (DL1)
 
+![Tripper Puck wiring schematic — ESP32-S3 with the SN65HVD230 CAN transceiver,
+Gravity 10DOF, NEO-8M GPS, SSD1306 OLED and two buttons, powered from the bike
+through a 5 V BEC](wiring-schema.jpg)
+
 A matchbox-sized BLE telemetry puck for e-bikes — companion hardware for the
 [Tripper iOS app](https://github.com/kbirand/Tripper). It streams 5 Hz GPS,
 on-chip-fused IMU orientation, and barometric data to the phone over
