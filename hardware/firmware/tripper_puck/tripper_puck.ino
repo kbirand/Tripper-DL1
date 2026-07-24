@@ -541,6 +541,15 @@ void refreshOled(uint32_t now) {
 }
 
 // ---------- setup ----------
+// Adafruit_SSD1306::begin() returns true as soon as its framebuffer mallocs —
+// it never checks for an ACK — so an unplugged display still reported "ok" and
+// then ate a NACKing 512-byte transfer on every refresh. Probe the bus first
+// so oledOk means what it says.
+bool i2cPresent(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;
+}
+
 // Listen-only: the controller never transmits and never even ACKs, so the
 // puck cannot influence the bike's bus whatever this firmware does. Failure
 // here is non-fatal — the puck is a GPS/IMU logger first and must still boot
@@ -607,9 +616,11 @@ void setup() {
     bmp.setSampling(Adafruit_BMP280::MODE_NORMAL, Adafruit_BMP280::SAMPLING_X2,
                     Adafruit_BMP280::SAMPLING_X16, Adafruit_BMP280::FILTER_X4,
                     Adafruit_BMP280::STANDBY_MS_63);
-  oledOk = oled.begin(SSD1306_SWITCHCAPVCC, 0x3C) || oled.begin(SSD1306_SWITCHCAPVCC, 0x3D);
+  uint8_t oledAddr = i2cPresent(0x3C) ? 0x3C : i2cPresent(0x3D) ? 0x3D : 0;
+  oledOk = oledAddr && oled.begin(SSD1306_SWITCHCAPVCC, oledAddr);
   Serial.printf("IMU %s | BMP280 %s | OLED %s\n",
-                imuOk ? "ok" : "FAIL", bmpOk ? "ok" : "FAIL", oledOk ? "ok" : "FAIL");
+                imuOk ? "ok" : "FAIL", bmpOk ? "ok" : "FAIL",
+                oledOk ? "ok" : oledAddr ? "FAIL" : "absent");
 
   bool gpsOk = gpsBringup();
   Serial.printf("GPS %s (115200/5Hz)%s\n", gpsOk ? "ok" : "NOT RESPONDING",
