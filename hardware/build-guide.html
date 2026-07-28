@@ -198,8 +198,8 @@
     <h1>Tripper Puck</h1>
     <p class="dek">A matchbox-sized GPS + IMU + barometer telemetry puck that streams to the Tripper app over BLE and reads the bike's own CAN bus. Powered from the bike through a 5 V BEC — no battery, no SD card. Headless by design: <b>the phone is its recorder, the OLED is a convenience</b>.</p>
     <div class="meta">
-      <span class="chip">Budget <b>≈ ₺2.700 core</b></span>
-      <span class="chip">Size <b>≈ 55 × 40 × 22 mm</b></span>
+      <span class="chip">Budget <b>≈ ₺3.700 core</b></span>
+      <span class="chip">Size <b>rear ≈ 55 × 40 × 22 mm + bar box</b></span>
       <span class="chip">Power <b>bike 5 V BEC</b></span>
       <span class="chip">Build time <b>1 weekend</b></span>
     </div>
@@ -295,9 +295,30 @@
             <td>any hobby shop</td>
             <td class="num">₺100–150</td>
           </tr>
+          <tr>
+            <td><span class="pill core">Core</span></td>
+            <td><b>M8 4-pin connector pair</b><br><span class="mono">219A-04MSR</span> panel + <span class="mono">ASM08AF04001</span> cable</td>
+            <td>Bike → rear enclosure: +5 V, GND, CAN_H, CAN_L. Male on the panel, female on the live cable side. Pulling it isolates power <em>and</em> CAN before you flash.</td>
+            <td>local connector stockist</td>
+            <td class="num">₺525</td>
+          </tr>
+          <tr>
+            <td><span class="pill core">Core</span></td>
+            <td><b>M12 8-pin A-coded pair</b> + shielded 8-core cable</td>
+            <td>Rear → handlebar enclosure: 3V3, GND, SDA, SCL, GPS TX/RX, two buttons. M12 over M8 8-pin — bigger contacts, field-assemblable, far easier to terminate.</td>
+            <td>local connector stockist</td>
+            <td class="num">₺400–700</td>
+          </tr>
+          <tr>
+            <td><span class="pill core">Core</span></td>
+            <td><b>Handlebar-run passives</b>: 2× 2.2 kΩ (or 1.5 kΩ past 2 m), 2× 10 kΩ, 2× 100 nF, 1× 100 µF</td>
+            <td>I²C pull-ups, button pull-up/filter networks, and the bulk cap at the bar end. Without these a metre of cable gives you phantom presses and a torn display.</td>
+            <td>any electronics shop</td>
+            <td class="num">₺30</td>
+          </tr>
         </tbody>
         <tfoot>
-          <tr><td colspan="4">Core total</td><td class="num">≈ ₺2.600–3.500</td></tr>
+          <tr><td colspan="4">Core total</td><td class="num">≈ ₺3.500–4.700</td></tr>
         </tfoot>
       </table>
     </div>
@@ -362,26 +383,49 @@
   <section>
     <div class="sec-head">
       <h2>Wiring map</h2>
-      <p>Everything is 3.3 V logic — no level shifters. Three buses (I²C, GPS UART, bike CAN), two buttons, done.</p>
+      <p>Everything is 3.3 V logic — no level shifters. Four buses (two I²C, GPS UART, bike CAN), two buttons, done. The <b>⇢ bar</b> marker means the signal leaves the rear enclosure for the handlebar.</p>
     </div>
     <div class="tablewrap">
       <table>
         <thead><tr><th>XIAO pin</th><th>GPIO</th><th>Connects to</th><th>Bus / signal</th></tr></thead>
         <tbody>
-          <tr><td class="mono">D4</td><td class="mono">GPIO5</td><td>10DOF <span class="mono">SDA</span> (Gravity blue) + OLED <span class="mono">SDA</span></td><td>I²C data — BNO055 <span class="mono">0x28</span> + BMP280 <span class="mono">0x76</span> + SSD1306 <span class="mono">0x3C</span></td></tr>
-          <tr><td class="mono">D5</td><td class="mono">GPIO6</td><td>10DOF <span class="mono">SCL</span> (Gravity green) + OLED <span class="mono">SCK</span></td><td>I²C clock — <b>run at 100 kHz</b>, see below (400 kHz burst for OLED frames only)</td></tr>
-          <tr><td class="mono">D6 (TX)</td><td class="mono">GPIO43</td><td>GPS <span class="mono">RX</span></td><td>UART 9600→115200 baud</td></tr>
-          <tr><td class="mono">D7 (RX)</td><td class="mono">GPIO44</td><td>GPS <span class="mono">TX</span></td><td>UART (NMEA / UBX in)</td></tr>
-          <tr><td class="mono">D1</td><td class="mono">GPIO2</td><td>Screen button → GND</td><td>Input, internal pull-up — 12 mm glove button. Click = next screen · 3 s hold = toggle auto-cycling</td></tr>
-          <tr><td class="mono">D2</td><td class="mono">GPIO3</td><td>Marker/zero button → GND (HW-483)</td><td>Click = marker · 10 s hold = zero attitude (saved to NVS)</td></tr>
+          <tr><td class="mono">D4</td><td class="mono">GPIO5</td><td>10DOF <span class="mono">SDA</span> (Gravity blue)</td><td>I²C bus 0 (<span class="mono">Wire</span>) data — BNO055 <span class="mono">0x28</span> + BMP280 <span class="mono">0x76</span>. <b>Rear enclosure only</b>, ~15 cm</td></tr>
+          <tr><td class="mono">D5</td><td class="mono">GPIO6</td><td>10DOF <span class="mono">SCL</span> (Gravity green)</td><td>I²C bus 0 clock — <b>run at 100 kHz</b>, see below</td></tr>
+          <tr><td class="mono">D3</td><td class="mono">GPIO4</td><td>OLED <span class="mono">SDA</span> <b>⇢ bar</b></td><td>I²C bus 1 (<span class="mono">Wire1</span>) data — SSD1306 <span class="mono">0x3C</span> alone</td></tr>
+          <tr><td class="mono">D10</td><td class="mono">GPIO9</td><td>OLED <span class="mono">SCK</span> <b>⇢ bar</b></td><td>I²C bus 1 clock — 100 kHz idle, 400 kHz frame burst</td></tr>
+          <tr><td class="mono">D6 (TX)</td><td class="mono">GPIO43</td><td>GPS <span class="mono">RX</span> <b>⇢ bar</b></td><td>UART 9600→115200 baud</td></tr>
+          <tr><td class="mono">D7 (RX)</td><td class="mono">GPIO44</td><td>GPS <span class="mono">TX</span> <b>⇢ bar</b></td><td>UART (NMEA / UBX in)</td></tr>
+          <tr><td class="mono">D1</td><td class="mono">GPIO2</td><td>Screen button → GND <b>⇢ bar</b></td><td>Input, internal pull-up <b>+ 10 kΩ / 100 nF</b> (see below). 12 mm glove button. Click = next screen · 3 s hold = toggle auto-cycling</td></tr>
+          <tr><td class="mono">D2</td><td class="mono">GPIO3</td><td>Marker/zero button → GND (HW-483) <b>⇢ bar</b></td><td>Click = marker · 10 s hold = zero attitude (saved to NVS)</td></tr>
           <tr><td class="mono">D8</td><td class="mono">GPIO7</td><td>SN65HVD230 <span class="mono">CTX</span></td><td>CAN TX — straight through, <b>not</b> a crossover like the GPS UART</td></tr>
           <tr><td class="mono">D9</td><td class="mono">GPIO8</td><td>SN65HVD230 <span class="mono">CRX</span></td><td>CAN RX — 250 kbit/s, listen-only (ESP32-S3 TWAI controller)</td></tr>
-          <tr><td class="mono">D0, D3, D10</td><td class="mono">—</td><td><em>free</em></td><td>Former NeoPixel / SD pins — e-bike edition uses neither</td></tr>
+          <tr><td class="mono">D0</td><td class="mono">—</td><td><em>free</em></td><td>Former NeoPixel pin — e-bike edition uses none</td></tr>
           <tr><td class="mono">5V (VUSB)</td><td>—</td><td><b>5 V BEC</b> +out (from the bike)</td><td>Power in — no battery; the puck boots with the bike. USB-C is for flashing only</td></tr>
           <tr><td class="mono">GND</td><td>—</td><td>BEC −out + all module GND</td><td>Common ground — also the bike's ground via the BEC, so the CAN tap needs no extra ground wire</td></tr>
-          <tr><td class="mono">3V3</td><td>—</td><td>All module VCC (CAN, Gravity, OLED, GPS)</td><td>3.3 V rail off the XIAO regulator</td></tr>
+          <tr><td class="mono">3V3</td><td>—</td><td>All module VCC — CAN + Gravity at the rear, OLED + GPS <b>⇢ bar</b></td><td>3.3 V rail off the XIAO regulator. Put a <b>100 µF</b> bulk cap at the handlebar end</td></tr>
         </tbody>
       </table>
+    </div>
+    <div class="note">
+      <b>Two I²C buses, because the display moved to the handlebar</b>
+      The sensors ride at the rear and the OLED sits on the bar, about a metre of cable apart. Sharing one bus would drag the BNO055 — already the fragile part, already forcing the whole bus to 100 kHz — onto that long, capacitive, electrically noisy run. So they're split: <b>bus 0 (<span class="mono">Wire</span>, D4/D5)</b> stays 15 cm long inside the rear box with the BNO055 and BMP280; <b>bus 1 (<span class="mono">Wire1</span>, D3/D10)</b> carries only the OLED out to the bar.<br><br>
+      The asymmetry is the point. A metre of cable can glitch a screen and nobody loses data; the same metre on the sensor bus costs you the ride. Firmware: <span class="mono">Wire1.begin(D3, D10)</span>, idling at <span class="mono">OLED_BUS_HZ</span> (100 kHz) and bursting frames at <span class="mono">OLED_BURST_HZ</span> (400 kHz). <b>If the display tears or drops out, drop the burst to 100 kHz first</b> — that one constant is the whole debug story.
+    </div>
+    <div class="note warn">
+      <b>Rules for the handlebar run — a metre of I²C is not free</b>
+      <p style="margin-top:6px"><b>The handlebar box is 3.3 V only.</b> Both things in it — the SSD1306 and the NEO-8M carrier — run off the XIAO's own 3V3 regulator. The <em>only</em> 5 V in the whole build is the BEC feeding VUSB inside the rear box; never run it up to the bar. That also sharpens the rules below: there's no regulator at the far end to absorb cable drop, so whatever the metre of wire loses comes straight out of the GPS's supply margin.</p>
+      <ul>
+        <li><b>Shielded multicore</b>, shield grounded <b>at the rear end only</b>. Both ends makes a loop.</li>
+        <li><b>SDA and SCL each twisted with their own GND return</b> — never twisted together, they crosstalk. Same for GPS TX/RX.</li>
+        <li><b>2.2 kΩ pull-ups on the OLED bus</b>, fitted at the ESP32 end, replacing the module's 4.7–10 kΩ. A metre adds ~100 pF and weak pull-ups can't drag the edges up through it.</li>
+        <li><b>10 kΩ to 3V3 + 100 nF to GND on D1 and D2</b>, at the ESP32 end. The internal pull-up is ~45 kΩ; a metre of wire on that is an antenna for BEC and controller switching noise, and you get phantom presses.</li>
+        <li><b>100 µF at the handlebar end</b>, across 3V3/GND near the GPS. Its acquisition current spikes into the cable inductance otherwise sag the rail and lengthen time-to-fix.</li>
+        <li><b>≥ 26 AWG</b> on 3V3 and GND. The bar end draws ~60 mA — only ~16 mV of drop at 26 AWG, but thin 30 AWG hookup wire more than doubles it, off a rail with no headroom to spare.</li>
+        <li><b>Longer than a metre?</b> The pull-up and the bus capacitance set the rise time, which must stay under 1 µs at 100 kHz, while the sink current (3.3 V ÷ R) must stay under 3 mA. At ~100 pF per metre that gives <b>2.2 kΩ to ~2 m and 1.5 kΩ (2.2 mA sink) to ~3 m</b>; past 3 m the 400 pF bus-capacitance ceiling binds and no pull-up value saves it. Beyond 2 m also pin <span class="mono">OLED_BURST_HZ</span> at 100 kHz.</li>
+        <li><b>Don't reach for an I²C buffer.</b> The arithmetic above covers any run a motorcycle actually needs, and both usual parts are unobtainable domestically — the <span class="mono">P82B715</span> is obsolete and the <span class="mono">P82B96</span> shows zero stock at 4–6 weeks' lead. Switching the display to SPI to dodge the issue is worse: it turns an 8-core cable into a 12-core one, and 12 × 0.14 mm² shielded is ~7.5 mm of stiff cable that will fatigue at the steering head.</li>
+        <li><b>Keep the cable thin.</b> 8 × 0.14 mm² (≈26 AWG) shielded is ~6 mm OD and stays flexible. 0.14 mm² carries the ~60 mA with room to spare, so there is no reason to go thicker and every reason not to.</li>
+      </ul>
+      GPS UART needs none of this — 115200 baud push-pull point-to-point is happy over several metres. And moving the GPS to the bar satisfies the ≥ 15 mm antenna rule for free, since the ESP32 stays at the rear.
     </div>
     <div class="note warn">
       <b>The BNO055 + ESP32 I²C clock-stretch problem — read before you solder</b>
@@ -394,7 +438,26 @@
     </div>
     <div class="note warn">
       <b>Antenna rule (this decides your GPS quality)</b>
-      Mount the GPS patch antenna at the top of the enclosure, facing the sky, at least 15 mm away from the ESP32 module — its RF noise degrades GPS reception. If the module has a u.fl connector, route the antenna to the lid.
+      Mount the GPS patch antenna at the top of the <b>handlebar</b> enclosure, facing the sky. The ≥ 15 mm separation from the ESP32 comes free now that the module lives at the rear — but keep it clear of the OLED ribbon and the USB cable too.
+    </div>
+
+    <h3>Connectors — two harnesses, deliberately different</h3>
+    <p>Two enclosures means two cable runs. They're different sizes on purpose: you cannot cross-plug them.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Run</th><th>Conductors</th><th>Connector</th></tr></thead>
+        <tbody>
+          <tr><td><b>Bike → rear box</b></td><td><b>+5 V</b>, GND, CAN_H, CAN_L</td><td><b>M8 4-pin</b>, IP67</td></tr>
+          <tr><td><b>Rear box → handlebar box</b></td><td><b>3V3</b>, GND, SDA, SCL, GPS TX, GPS RX, btn1, btn2</td><td><b>M12 8-pin A-coded</b>, IP67</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The two runs carry different voltages — 5 V into the rear box, 3.3 V onward to the bar — which is a second reason to keep the connectors different sizes.</p>
+    <div class="note">
+      <b>Gender follows the live side</b>
+      Whichever end stays energised when the pair comes apart gets the <b>female</b> sockets — recessed contacts can't short against the frame. On the bike run that's the cable (it runs back to the BEC), so the <b>rear enclosure carries a male panel receptacle</b> and the cable carries a female plug. The handlebar run is dead on both sides once the bike connector is pulled, so either orientation is safe there; keep the panel male for consistency.<br><br>
+      Parts verified in stock domestically (July 2026): rear panel <b>ATTEND 219A-04MSR</b> ≈ ₺243, bike cable <b>SIGNAL ASM08AF04001</b> ≈ ₺282. Adding a second break so the BEC and CAN tap separate from the 4-core costs <b>ASM08AM04001</b> + another <b>ASM08AF04001</b> — but these field-assembly bodies take a <em>single</em> cable gland, so the BEC pair and CAN pair must merge into one jacket before the connector regardless. Unless that junction genuinely needs to come apart, solder plus adhesive-lined heat-shrink is more vibration-tolerant, better sealed, and free.<br><br>
+      <b>Keep the pin assignment identical at both ends of every run.</b> With two connectors in one harness it is very easy to mirror one and feed 5 V into CAN_H.
     </div>
   </section>
 
@@ -408,7 +471,7 @@
     <div class="note warn">
       <b>Never connect USB and the bike at the same time</b>
       Once <span class="mono">CANH</span>/<span class="mono">CANL</span> are spliced in, the puck's ground <em>is</em> the bike's ground — shared through the BEC's negative rail. Attaching a mains-earthed computer ties the traction battery's negative to protective earth through your machine. Worse, the BEC drives 5 V into the XIAO's <span class="mono">5V</span> (VUSB) pin; plug a USB host in on top of that and two 5 V rails collide on the same node.<br><br>
-      Fit a <b>2-pin connector</b> in the CANH/CANL run, and kill the BEC (or unplug that connector) before you attach USB to flash. Read telemetry over BLE instead of serial — the puck is a BLE device; use what it already does.
+      <b>Unplug the M8 4-pin bike connector before you attach USB.</b> It carries +5 V, GND, CANH and CANL together, so pulling it isolates both hazards in one action — it replaces the 2-pin CAN-only break earlier revisions called for. Read telemetry over BLE instead of serial — the puck is a BLE device; use what it already does.
     </div>
 
     <div class="note warn">
@@ -472,7 +535,7 @@
       <li>
         <h3>Get a GPS fix</h3>
         <p>Wire GPS to UART, run a TinyGPS++ example <b>near a window or outside</b> — first cold fix can take 1–5 min. Then send the UBX commands to raise the rate to 5–10 Hz and baud to 115200 (one-time config, saved to the module's flash/battery-backed RAM).</p>
-        <p><b>✅ Fix acquired 2026-07-21</b> — NMEA + TinyGPS++ verified, MON-VER confirms genuine u-blox 8 (ROM 3.01, PROTVER 18, GPS/GLO/BDS/QZSS). Config applied &amp; verified same day (<span class="mono">firmware/gps_config_5hz/</span>): CFG-RATE 200 ms ACKed, read-back confirmed, saved to BBR, measured 5.0 GGA/s at 115200. Production firmware re-applies at every boot in case the backup battery ever drains. Bench extra that got promoted: 0.91" SSD1306 OLED at <span class="mono">0x3C</span> on the shared I²C bus — now integral to <span class="mono">firmware/tripper_puck/</span> (clock/data screens, hold toggle, zero progress UI).</p>
+        <p><b>✅ Fix acquired 2026-07-21</b> — NMEA + TinyGPS++ verified, MON-VER confirms genuine u-blox 8 (ROM 3.01, PROTVER 18, GPS/GLO/BDS/QZSS). Config applied &amp; verified same day (<span class="mono">firmware/gps_config_5hz/</span>): CFG-RATE 200 ms ACKed, read-back confirmed, saved to BBR, measured 5.0 GGA/s at 115200. Production firmware re-applies at every boot in case the backup battery ever drains. Bench extra that got promoted: 0.91" SSD1306 OLED at <span class="mono">0x3C</span> — bench-proven on the shared bus, since moved to its own <span class="mono">Wire1</span> (D3/D10) for the handlebar run — now integral to <span class="mono">firmware/tripper_puck/</span> (clock/data screens, hold toggle, zero progress UI).</p>
       </li>
       <li>
         <h3>Bring up the CAN bus</h3>
@@ -490,15 +553,17 @@
         <ul>
           <li>Shorten all wires to final lengths; silicone wire tolerates vibration best.</li>
           <li>BEC +out → the XIAO 5V (VUSB) pin, BEC −out → GND. Heat-shrink everything; the BEC's input taps the bike's pack / accessory line.</li>
-          <li>Put a <b>2-pin connector in the CANH/CANL run</b> so you can isolate the bike before ever attaching USB to flash.</li>
-          <li>Both buttons in the lid; the OLED window plus the SN65HVD230 on its own short pigtail.</li>
+          <li>Terminate the bike run in the <b>M8 4-pin</b> connector (male on the panel) so you can isolate the bike before ever attaching USB to flash.</li>
+          <li>Terminate the handlebar run in the <b>M12 8-pin</b> connector. Fit its passives while the boards are still accessible: 2.2 kΩ OLED pull-ups and the 10 kΩ / 100 nF button networks at the <em>rear</em> end, the 100 µF bulk cap at the <em>bar</em> end.</li>
+          <li>Rear box: XIAO, SN65HVD230 on a short pigtail, Gravity board on foam. Handlebar box: OLED window, both buttons in the lid, GPS under a thin lid section.</li>
         </ul>
       </li>
       <li>
         <h3>Enclosure &amp; mounting</h3>
         <ul>
           <li>Two enclosures, split rear / handlebar: the ESP32, CAN module and sensor board ride at the rear near the controller tap; the OLED, two buttons and GPS sit at the handlebar.</li>
-          <li>Print a two-part case ≈ 55 × 40 × 22 mm; cutouts: USB-C (flashing), two buttons, the OLED window, and the CAN + BEC leads. Search "XIAO ESP32S3 GPS logger case" on Printables for starting points.</li>
+          <li><b>Rear case</b> ≈ 55 × 40 × 22 mm; cutouts: USB-C (flashing), the <b>M8 4-pin</b> panel receptacle for the bike, and the <b>M12 8-pin</b> panel receptacle for the handlebar run. Check your wall thickness against the connector's thread depth — M8/M12 panel jacks typically want ≤ 2–3 mm.</li>
+          <li><b>Handlebar case</b>: OLED window, two button cutouts, a sky-facing 1.5 mm lid section over the GPS patch, and the M12 cable entry. No USB port here.</li>
           <li>Sensor board sits on the 2 mm foam pad — isolates handlebar buzz from the accelerometer.</li>
           <li>GPS antenna under a 1.5 mm lid section (plastic is RF-transparent), ESP32 at the opposite end.</li>
           <li>Mount the cases <b>rigidly</b> to the bar/frame (the foam is inside, not outside) — same rule as the phone.</li>
@@ -614,7 +679,10 @@
       <h2>Pitfalls — read before soldering</h2>
     </div>
     <ul class="check">
-      <li><input type="checkbox"> <b>BEC vs USB — never both:</b> the BEC feeds 5 V into VUSB. Plugging USB in while the BEC is powered collides two 5 V rails and, with the CAN tap connected, bridges the bike's ground to mains earth. Kill the BEC or unplug the CAN connector before flashing.</li>
+      <li><input type="checkbox"> <b>BEC vs USB — never both:</b> the BEC feeds 5 V into VUSB. Plugging USB in while the BEC is powered collides two 5 V rails and, with the CAN tap connected, bridges the bike's ground to mains earth. Unplug the M8 4-pin bike connector before flashing — it kills power and CAN in one pull.</li>
+      <li><input type="checkbox"> <b>Don't share one I²C bus with the handlebar:</b> the OLED belongs on <span class="mono">Wire1</span> (D3/D10), not on the sensor bus. Hanging a metre of cable off D4/D5 risks the BNO055, and a flaky sensor bus costs data — a flaky display costs nothing.</li>
+      <li><input type="checkbox"> <b>Phantom button presses:</b> a metre of wire on a 45 kΩ internal pull-up picks up controller noise. Fit the 10 kΩ / 100 nF network on D1 and D2 at the ESP32 end before you blame the firmware.</li>
+      <li><input type="checkbox"> <b>Torn or blank OLED after the extension:</b> drop <span class="mono">OLED_BURST_HZ</span> to 100 kHz first, then check the 2.2 kΩ pull-ups, then check that SDA and SCL aren't twisted with each other.</li>
       <li><input type="checkbox"> <b>CAN terminator:</b> remove the module's onboard <span class="mono">121</span> (120 Ω) resistor — the bike's bus is already terminated at 60 Ω and a third makes it 40 Ω. Measure open across CANH/CANL before wiring in.</li>
       <li><input type="checkbox"> <b>CANH/CANL swap:</b> harmless but silent — you just get zero frames. If the probe shows no data, swap the pair first.</li>
       <li><input type="checkbox"> <b>BEC dropout at standstill:</b> confirm the BEC's input line stays live when the bike is stopped, or the puck reboots every time you stop.</li>
