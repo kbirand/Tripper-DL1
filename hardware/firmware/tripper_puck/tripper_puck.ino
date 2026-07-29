@@ -40,6 +40,13 @@
 #include <driver/twai.h>
 
 // ---------- pins & constants ----------
+// I2C is on D3/D5, not the D4/D5 the Wire default would pick: on this XIAO the
+// D4 pad sits clamped low — it reads 0 even against the internal pull-up with
+// nothing attached — so SDA can never idle high there and no device can signal.
+// D3 was free (see the README pin map) and tests clean. Verified with
+// bench_imu_can: both lines float high, 0x28 and 0x76 enumerate, 0 bus errors.
+#define PIN_SDA      D3
+#define PIN_SCL      D5
 #define PIN_BUTTON   D1
 #define PIN_BUTTON2  D2        // screen hold / attitude zero
 #define CAN_TX_GPIO  GPIO_NUM_7   // D8 -> SN65HVD230 CTX
@@ -606,7 +613,7 @@ void setup() {
   qRef = imu::Quaternion(prefs.getFloat("qw", 1.0f), prefs.getFloat("qx", 0.0f),
                          prefs.getFloat("qy", 0.0f), prefs.getFloat("qz", 0.0f));
 
-  Wire.begin();
+  Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(100000);
   Wire.setTimeOut(1000);
 

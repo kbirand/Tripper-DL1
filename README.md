@@ -56,10 +56,20 @@ the OLED, two buttons and GPS sit at the handlebar (GPS wants the sky view).
 |---|---|
 | D1 | Screen button → GND (internal pull-up) |
 | D2 | Marker/zero button → GND (internal pull-up) |
-| D4 / D5 | I²C SDA / SCL — BNO055 `0x28`, BMP280 `0x76`, OLED `0x3C` @ 100 kHz |
+| D3 / D5 | I²C SDA / SCL — BNO055 `0x28`, BMP280 `0x76`, OLED `0x3C` @ 100 kHz |
 | D6 / D7 | UART TX→GPS RX / RX←GPS TX @ 115200 |
 | D8 / D9 | CAN TX→CTX / RX←CRX (SN65HVD230), 250 kbit/s listen-only |
-| D0, D3, D10 | free |
+| D0, D10 | free |
+| D4 | **dead on this unit** — clamped low, see below. Do not use |
+
+SDA sits on **D3, not the D4** that `Wire.begin()` would pick by default. On this
+XIAO the D4 pad reads 0 even with the internal pull-up enabled and nothing
+attached to it — shorted to ground somewhere on the board. An I²C line that
+cannot idle high is a bus no device can ever signal on, which presents exactly
+like four dead sensors. `busLinesHigh()` in
+[`bench_imu_can`](hardware/firmware/bench_imu_can/) reports both lines' states at
+boot and still watches D4, so if a future board has a healthy pad it says so and
+the pin map can go back to the default.
 
 The I²C bus **must run at 100 kHz** — the BNO055's clock-stretching upsets
 ESP32 I²C at higher speeds (validated: 59,722 reads / 0 errors / 10 min).
@@ -76,14 +86,14 @@ the top:
  n/c ─────────────────┤ D0                 5V ├──◄ BEC +5V ◄─ BEC 5V 3A ◄─ bike pack
  Screen button ○──────┤ D1                GND ├────────● GND rail ◄ BEC GND
  Marker/Zero button ○─┤ D2                3V3 ├────────● 3V3 rail
- n/c ─────────────────┤ D3                D10 ├─ n/c
- SDA bus ●────────────┤ D4                 D9 ├──────◄ CAN CRX
+ SDA bus ●────────────┤ D3                D10 ├─ n/c
+ n/c (D4 is dead) ────┤ D4                 D9 ├──────◄ CAN CRX
  SCL bus ●────────────┤ D5                 D8 ├──────► CAN CTX
  to GPS RX ◄──────────┤ D6 (TX)       (RX) D7 ├──────◄ from GPS TX
                       └───────────────────────┘
                             XIAO ESP32-S3
 
- ● 3V3 rail ─┬─ Gravity 10DOF VCC (red)     ● SDA bus (D4) ─┬─ Gravity SDA (blue)
+ ● 3V3 rail ─┬─ Gravity 10DOF VCC (red)     ● SDA bus (D3) ─┬─ Gravity SDA (blue)
              ├─ GPS VCC                                     └─ OLED SDA
              └─ OLED VCC
                                             ● SCL bus (D5) ─┬─ Gravity SCL (green)
@@ -124,6 +134,7 @@ Arduino sketches in [`hardware/firmware/`](hardware/firmware/):
 | Sketch | Purpose |
 |---|---|
 | [`tripper_puck`](hardware/firmware/tripper_puck/) | **Production firmware** — sensors → BLE + OLED |
+| [`bench_imu_can`](hardware/firmware/bench_imu_can/) | Bring-up rig for a half-built puck — IMU + baro + CAN only, no OLED/buttons/GPS. Talks to the BNO055 registers directly (a library `begin()` can't tell a phantom ACK from a chip), counts every failed read, and re-probes missing sensors every 3 s so a wire soldered mid-run comes up on its own. Same BLE UUIDs and packets as production |
 | [`i2c_gate`](hardware/firmware/i2c_gate/) | BNO055 clock-stretch stress test (the go/no-go gate) |
 | [`i2c_diag`](hardware/firmware/i2c_diag/) | Wiring diagnostic — line states + normal/swapped bus scans |
 | [`gps_config_5hz`](hardware/firmware/gps_config_5hz/) | One-time GPS config: 5 Hz + 115200, saved to BBR (production firmware re-applies at boot) |
