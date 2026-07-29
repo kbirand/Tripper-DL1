@@ -71,7 +71,8 @@ BO_ 1025 BMS_Status: 8 BMS
    SG_ Unknown_3 : 24|8@1+ (1,0) [0|255] "" Dash
 
 BO_ 1168 ModeEcho: 8 MotorController
-   SG_ ModeLevel : 0|8@1+ (1,0) [0|255] "" Dash
+   SG_ RegenLevel : 0|3@1+ (1,0) [1|4] "" Dash
+   SG_ ModeLevel : 3|3@1+ (1,0) [1|2] "" Dash
 
 
 CM_ BO_ 257 "Pack voltage at 0.1 V resolution. Cross-checked against the sum of the 16 cell voltages in 0x201.";
@@ -85,8 +86,12 @@ CM_ SG_ 514 FreeCounter "12-bit free-running counter. NOT an odometer - it accum
 CM_ SG_ 514 Kickstand "Hard interlock, confirmed twice. In the ride logs it is set for 12.4%/35.2% of samples but 0.00% of samples above 2 km/h (max speed while set: 0.0 km/h). Directly toggled on the bench 2026-07-23: folding the stand drove 0x202[0] 0x20 <-> 0xA0.";
 CM_ SG_ 514 StandUp "Companion to Kickstand, inverted: 0x202[1] bit0 goes 1 -> 0 on the same frame the stand comes down. Observed on every bench toggle.";
 CM_ SG_ 514 Demand "Bench-observed: rests at a mode floor (750 Eco / 1100 Sport) and climbs to 1200 under throttle, LEADING MotorRPM by ~0.3 s - it moves before the motor responds, so it is a command rather than a measurement. 1200 also appears as a fixed constant in 0x101[4:6] and 0x302[6:8], consistent with a rated ceiling. If the units are 0.1 A this reads as 75.0/110.0 A limits against a 120.0 A rating, and ride_2's peak current of 101.6 A against its own 1000 (=100.0 A) ceiling supports that - but it is one data point, so treat the unit as unconfirmed. WARNING: on the firmware in the inklit ride logs this field sits one byte lower, at 0x202[2:4], and is mode-linked only - it does not track throttle there. Check the offset before trusting it on another bike.";
-CM_ BO_ 1168 "NOT a temperature. 0x490[0] correlates 0.996 (ride_1) and 0.963 (ride_2) with RideMode and only 0.30/0.43 with elapsed time. Confirmed on the bench 2026-07-23: switching Eco/Sport drove it 0x09 <-> 0x11 in the same frame as the 0x202[0] mode bits. An earlier reading of it as a warming component was wrong; the apparent rise across ride_2 was the rider changing mode.";
+CM_ BO_ 1168 "NOT a temperature. 0x490[0] correlates 0.996 (ride_1) and 0.963 (ride_2) with RideMode and only 0.30/0.43 with elapsed time. Confirmed on the bench 2026-07-23: switching Eco/Sport drove it 0x09 <-> 0x11 in the same frame as the 0x202[0] mode bits. An earlier reading of it as a warming component was wrong; the apparent rise across ride_2 was the rider changing mode. The byte is two fields, not one: bits 5:3 carry the mode and bits 2:0 the regen level, which is why the whole-byte value tracked mode so well while never being only mode.";
+CM_ SG_ 1168 RegenLevel "Bits 2:0, reads 1..4. Bench-verified 2026-07-30 across two independent captures and 10 button presses: 0x490[0] stepped 0x11/0x12/0x13/0x14 in lock step with the dash. One sweep ran DOWNWARD (4->3->2->1) before coming back up, which rules out a coincidental monotonic counter. The selector reverses at each end rather than wrapping, so 0 never appears on a live bus and can safely mean unknown. NOT the low nibble: bit 3 belongs to ModeLevel, so in Eco the same regen 1 reads 0x09 - exactly the value logged on 2026-07-23.";
+CM_ SG_ 1168 ModeLevel "Bits 5:3, 1 Eco / 2 Sport - the same encoding RideMode uses in 0x202[0]. This split is what reconciles the 2026-07-23 Eco/Sport toggle (0x09 <-> 0x11) with the 2026-07-30 regen sweep: 0x09 is Eco+regen1, 0x11 is Sport+regen1. Bits 7:6 stayed 0 through every capture and are still unidentified.";
 
 VAL_ 514 Standstill 0 "Rolling" 1 "Stopped" ;
 VAL_ 514 Kickstand 0 "Up" 1 "Down" ;
 VAL_ 514 RideMode 1 "Eco" 2 "Sport" ;
+VAL_ 1168 RegenLevel 1 "Regen_1" 2 "Regen_2" 3 "Regen_3" 4 "Regen_4" ;
+VAL_ 1168 ModeLevel 1 "Eco" 2 "Sport" ;

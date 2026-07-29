@@ -85,6 +85,7 @@ struct __attribute__((packed)) TelemetryPacket {
   // ---- bike CAN block (ver 0x02). Zeroed and canFlags bit0 clear when the
   // bus is absent or stale, so the app must gate all of it on that bit.
   uint8_t  canFlags;     // bit0 live · bit1 kickstand down · bits3:2 ride mode
+                         // bits6:4 regen level 1..4 (0 = unknown/not live)
   uint16_t canSpeed_dkph;   // 0.1 km/h  (0x303[0:2])
   uint16_t canRpm;          // rpm       (0x203[0:2])
   uint16_t canPower_w;      // W         (0x203[2:4])
@@ -128,7 +129,7 @@ bool imuOk = false, bmpOk = false, oledOk = false, canOk = false;
 // Latest payload of each decoded message. Signal offsets and the evidence
 // behind every one of them live in tools/talaria.dbc.
 struct CanState {
-  uint8_t  f101[8], f201[8], f202[8], f203[8], f302[8], f303[8], f401[8];
+  uint8_t  f101[8], f201[8], f202[8], f203[8], f302[8], f303[8], f401[8], f490[8];
   uint32_t lastRxMs = 0;
   uint32_t frames = 0;
 } canS;
@@ -588,6 +589,7 @@ void canPoll() {
       case 0x302: memcpy(canS.f302, m.data, 8); break;
       case 0x303: memcpy(canS.f303, m.data, 8); break;
       case 0x401: memcpy(canS.f401, m.data, 8); break;
+      case 0x490: memcpy(canS.f490, m.data, 8); break;
       default: continue;                // other IDs are undecoded, ignore
     }
     canS.lastRxMs = millis();
@@ -804,9 +806,14 @@ void loop() {
     // than as a stale speed the app would happily plot.
     if (canOk && canS.lastRxMs && now - canS.lastRxMs < CAN_STALE_MS) {
       uint8_t st = canS.f202[0];
+      // Regen is bits 2:0 of 0x490[0] — NOT the low nibble: bit 3 is the bottom
+      // of the mode field there, so in Eco a nibble read returns 8+level. Only
+      // ever 1..4, and the selector reverses at each end instead of wrapping,
+      // so 0 never appears on a live bus and can mean "unknown".
       p.canFlags = 0x01 |                          // live
                    (((st >> 7) & 1) << 1) |        // kickstand down
-                   (((st >> 4) & 3) << 2);         // ride mode: 1 Eco, 2 Sport
+                   (((st >> 4) & 3) << 2) |        // ride mode: 1 Eco, 2 Sport
+                   ((canS.f490[0] & 0x07) << 4);   // regen level 1..4
       p.canSpeed_dkph = canU16(canS.f303, 0);
       p.canRpm        = canU16(canS.f203, 0);
       p.canPower_w    = canU16(canS.f203, 2);

@@ -208,7 +208,7 @@ Device name `Tripper-DL1`. One service, three characteristics:
 | 41 | i16×3 | lin x y z | linear accel, mg (sensor frame) |
 | 47 | i16 | maxG_mg | interval max \|lin\|, resets each packet |
 | 49 | u8 | marker | increments per button press |
-| 50 | u8 | canFlags | bit0 live · bit1 kickstand down · bits3:2 ride mode (1 Eco, 2 Sport) |
+| 50 | u8 | canFlags | bit0 live · bit1 kickstand down · bits3:2 ride mode (1 Eco, 2 Sport) · bits6:4 regen level 1–4 (0 = unknown) |
 | 51 | u16 | canSpeed_dkph | 0.1 km/h |
 | 53 | u16 | canRpm | motor rpm |
 | 55 | u16 | canPower_w | watts |
@@ -311,6 +311,8 @@ the `CM_` comments of [`tools/talaria.dbc`](tools/talaria.dbc).
 | Lowest cell + index | `0x201` | 2–3 LE, 5 | 1 mV |
 | Kickstand | `0x202` | byte 0 bit 7 | 1 = down |
 | Ride mode | `0x202` | byte 0 bits 5:4 | 1 Eco, 2 Sport |
+| Regen level | `0x490` | byte 0 bits 2:0 | 1–4 |
+| Ride mode echo | `0x490` | byte 0 bits 5:3 | 1 Eco, 2 Sport |
 | Throttle demand | `0x202` | 3–4 LE | units unconfirmed |
 
 Speed and RPM hold a fixed 5.887 ratio at r = 0.999 across two independent
@@ -324,7 +326,11 @@ Traps worth knowing:
 - **`0x202[6:8]` is not an odometer.** It is monotonic, which is why it looks
   like one, but its rate has correlation −0.0005 with speed and its counts per
   km differ 34% between rides. No odometer has been found on the bus.
-- **`0x490[0]` is not a temperature.** It is a ride-mode echo (r = 0.99).
+- **`0x490[0]` is not a temperature, and it is not one field.** Bits 5:3 echo
+  the ride mode (r = 0.99, which is why the whole byte looked like mode alone)
+  and bits 2:0 carry the regen level. Reading the low *nibble* as regen works
+  only in Sport: in Eco bit 3 is set, so regen 1 reads `0x09` rather than
+  `0x01`. Mask 3 bits, not 4.
 - **Byte offsets vary by firmware.** Throttle demand sits at `0x202[3:5]` here
   but at `0x202[2:4]` on the bike in the reference logs, where it doesn't
   track throttle at all. Verify offsets before trusting this on another bike.
