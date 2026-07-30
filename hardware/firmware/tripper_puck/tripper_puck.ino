@@ -115,7 +115,7 @@ struct __attribute__((packed)) StatusPacket {
   uint8_t  ver;          // 0x01
   uint8_t  fix;
   uint8_t  sats;
-  uint8_t  battPct;      // 0xFF = external USB power
+  uint8_t  battPct;      // 0xFF = external supply (BEC in production, USB while flashing)
   uint16_t hdop_c;
   uint32_t uptime_s;
   int16_t  temp_x10;     // BMP280 °C * 10
@@ -854,7 +854,9 @@ void loop() {
     s.ver = 0x01;
     s.fix = fixValid() ? 1 : 0;
     s.sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
-    s.battPct = 0xFF;                   // external USB power
+    // There is no battery on this build and no fuel gauge, so this is a
+    // constant sentinel, not a measurement. Production power is the BEC.
+    s.battPct = 0xFF;                   // external supply
     s.hdop_c = gps.hdop.isValid() ? (uint16_t)min(gps.hdop.hdop() * 100.0, 9999.0) : 9999;
     s.uptime_s = now / 1000;
     s.temp_x10 = (int16_t)(lastTempC * 10);

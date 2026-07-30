@@ -494,3 +494,7 @@ whose two ride logs were the reference data for every decode above.
 
 The full build story — shopping list (Turkey), decision records, validation
 results, pitfalls — lives in [`hardware/build-guide.html`](hardware/build-guide.html).
+
+What the **app** side has to do differently — the capability byte, the regen
+level, gating on `canFlags`, and why `battPct` is a sentinel rather than a
+reading — is in [`docs/app-integration.md`](docs/app-integration.md).
