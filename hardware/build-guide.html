@@ -231,8 +231,36 @@
   <!-- ============================================================ -->
   <section>
     <div class="sec-head">
+      <h2>Choosing a build</h2>
+      <p>Two configurations share one codebase and one BLE contract. Pick before you order — the Light build is four parts and one enclosure.</p>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th></th><th>Light build</th><th>Full build</th></tr></thead>
+        <tbody>
+          <tr><td>Physical form</td><td>one box at the rear</td><td>rear box <b>+ handlebar module</b></td></tr>
+          <tr><td>Sensing</td><td>IMU, barometer, bike CAN</td><td>IMU, barometer, bike CAN, <b>GPS</b></td></tr>
+          <tr><td>Display</td><td>none — the app is the UI</td><td><b>0.91" OLED</b>, 4 screens</td></tr>
+          <tr><td>Buttons</td><td>none — the app sends control writes</td><td><b>two</b> (screens · marker/zero)</td></tr>
+          <tr><td>Position from</td><td>the <b>phone's</b> GPS</td><td>the puck's own <b>5 Hz</b> GPS</td></tr>
+          <tr><td>Firmware</td><td><span class="mono">firmware/tripper_light/</span></td><td><span class="mono">firmware/tripper_puck/</span></td></tr>
+          <tr><td>Parts</td><td class="num">4</td><td class="num">8</td></tr>
+          <tr><td>Wires to run</td><td class="num">6</td><td class="num">14</td></tr>
+          <tr><td>Enclosures</td><td class="num">1</td><td class="num">2</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note">
+      <b>Start with the Light build</b>
+      It is the entire telemetry product — fused orientation, g-force, barometric altitude and every decoded bike-CAN signal — in four parts, and your phone already carries a GPS the app already reads. The Full build buys 5 Hz position (the phone's is 1 Hz), a dashboard readable with the phone pocketed, and two hardware buttons.<br><br>
+      <b>The Full build is strictly additive.</b> The handlebar parts land on pins the Light build leaves free (D1, D2, D6, D7), so getting there is an upgrade rather than a rebuild — nothing already soldered gets moved. The BLE packets are byte-identical across both, so the app needs no branch: a Light puck reports its GPS block as invalid, the same state a Full puck reports before it gets a fix, and a capability byte in the status packet says which is on the other end.
+    </div>
+
+    <div class="sec-head">
       <h2>Shopping list — Turkey</h2>
-      <p>Prices and stock <b>verified on-site 2026-07-11</b>. Everything below is orderable domestically — no customs.</p>
+      <p>Prices and stock <b>verified on-site 2026-07-11</b>. Everything below is orderable domestically — no customs. The first block is the Light build; the second is what Full adds.</p>
     </div>
 
     <div class="note warn">
@@ -246,6 +274,7 @@
           <tr><th></th><th>Part</th><th>Role</th><th>Source</th><th>≈ Price</th></tr>
         </thead>
         <tbody>
+          <tr><td colspan="5"><b>① Light build — the puck</b> · everything below is required</td></tr>
           <tr class="got">
             <td><span class="pill got">Obtained</span></td>
             <td><b>Seeed XIAO ESP32-S3</b><span class="got-note">SAMM order SM83985 · 2026-07-10</span></td>
@@ -262,13 +291,6 @@
           </tr>
           <tr class="got">
             <td><span class="pill got">Obtained</span></td>
-            <td><b>u-blox NEO-8M GPS</b> (GYGPSV1, patch antenna)<span class="got-note">Robotistan · 2026-07-10</span></td>
-            <td>Position · configure 5 Hz via UBX (10 Hz single-constellation)</td>
-            <td><a href="https://www.robotistan.com/ublox-gygpsv1-gps-modulu">Robotistan</a></td>
-            <td class="num">₺400–800</td>
-          </tr>
-          <tr class="got">
-            <td><span class="pill got">Obtained</span></td>
             <td><b>SN65HVD230 CAN module</b><span class="got-note">Alkatronik / Hepsiburada · 2026-07-23</span></td>
             <td><b>Reads the bike's own CAN bus</b> — 3.3 V transceiver, no level shifting. The ESP32-S3's built-in TWAI controller is the CAN peripheral; this is only the physical layer.</td>
             <td><a href="https://www.hepsiburada.com/alkatronik-sn65hvd230-can-modulu-p-HBCV00000FDLXI">Hepsiburada</a></td>
@@ -281,6 +303,21 @@
             <td>any hobby / RC shop</td>
             <td class="num">₺100–200</td>
           </tr>
+          <tr><td colspan="5"><b>② Full build adds — the handlebar module</b> · skip all of this for a Light build</td></tr>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
+            <td><b>u-blox NEO-8M GPS</b> (GYGPSV1, patch antenna)<span class="got-note">Robotistan · 2026-07-10</span></td>
+            <td>Position · configure 5 Hz via UBX (10 Hz single-constellation). The Light build uses the phone's GPS instead</td>
+            <td><a href="https://www.robotistan.com/ublox-gygpsv1-gps-modulu">Robotistan</a></td>
+            <td class="num">₺400–800</td>
+          </tr>
+          <tr class="got">
+            <td><span class="pill got">Obtained</span></td>
+            <td><b>SSD1306 0.91" OLED</b> 128×32<span class="got-note">bench extra, promoted 2026-07-21</span></td>
+            <td>Clock / live-data / bike-CAN screens and every status indicator. Joins the existing I²C bus at <span class="mono">0x3C</span> — no extra pins</td>
+            <td>any hobby shop</td>
+            <td class="num">₺60–120</td>
+          </tr>
           <tr class="got">
             <td><span class="pill got">Obtained</span></td>
             <td><b>Buttons</b>: 12 mm glove button + HW-483<span class="got-note">2026-07-11</span></td>
@@ -288,6 +325,7 @@
             <td>any hobby shop</td>
             <td class="num">₺30–60</td>
           </tr>
+          <tr><td colspan="5"><b>③ Both builds</b></td></tr>
           <tr class="got">
             <td><span class="pill got">Obtained</span></td>
             <td><b>Consumables</b>: silicone wire 28 AWG, heat-shrink, JST leads, 2 mm foam pad<span class="got-note">2026-07-11</span></td>
@@ -297,7 +335,8 @@
           </tr>
         </tbody>
         <tfoot>
-          <tr><td colspan="4">Core total</td><td class="num">≈ ₺2.600–3.500</td></tr>
+          <tr><td colspan="4"><b>Light build</b> total (① + ③)</td><td class="num">≈ ₺2.200–2.500</td></tr>
+          <tr><td colspan="4"><b>Full build</b> total (① + ② + ③)</td><td class="num">≈ ₺2.700–3.500</td></tr>
         </tfoot>
       </table>
     </div>
@@ -362,24 +401,24 @@
   <section>
     <div class="sec-head">
       <h2>Wiring map</h2>
-      <p>Everything is 3.3 V logic — no level shifters. Three buses (I²C, GPS UART, bike CAN), two buttons, done.</p>
+      <p>Everything is 3.3 V logic — no level shifters. The <b>Light build</b> is two buses (I²C, bike CAN) and the power pair. The <b>Full build</b> adds the GPS UART and two buttons on pins Light leaves free, so nothing already soldered moves.</p>
     </div>
     <div class="tablewrap">
       <table>
-        <thead><tr><th>XIAO pin</th><th>GPIO</th><th>Connects to</th><th>Bus / signal</th></tr></thead>
+        <thead><tr><th>XIAO pin</th><th>GPIO</th><th>Connects to</th><th>Bus / signal</th><th>Build</th></tr></thead>
         <tbody>
-          <tr><td class="mono">D4</td><td class="mono">GPIO5</td><td>10DOF <span class="mono">SDA</span> (Gravity blue) + OLED <span class="mono">SDA</span></td><td>I²C data — BNO055 <span class="mono">0x28</span> + BMP280 <span class="mono">0x76</span> + SSD1306 <span class="mono">0x3C</span></td></tr>
-          <tr><td class="mono">D5</td><td class="mono">GPIO6</td><td>10DOF <span class="mono">SCL</span> (Gravity green) + OLED <span class="mono">SCK</span></td><td>I²C clock — <b>run at 100 kHz</b>, see below (400 kHz burst for OLED frames only)</td></tr>
-          <tr><td class="mono">D6 (TX)</td><td class="mono">GPIO43</td><td>GPS <span class="mono">RX</span></td><td>UART 9600→115200 baud</td></tr>
-          <tr><td class="mono">D7 (RX)</td><td class="mono">GPIO44</td><td>GPS <span class="mono">TX</span></td><td>UART (NMEA / UBX in)</td></tr>
-          <tr><td class="mono">D1</td><td class="mono">GPIO2</td><td>Screen button → GND</td><td>Input, internal pull-up — 12 mm glove button. Click = next screen · 3 s hold = toggle auto-cycling</td></tr>
-          <tr><td class="mono">D2</td><td class="mono">GPIO3</td><td>Marker/zero button → GND (HW-483)</td><td>Click = marker · 10 s hold = zero attitude (saved to NVS)</td></tr>
-          <tr><td class="mono">D8</td><td class="mono">GPIO7</td><td>SN65HVD230 <span class="mono">CTX</span></td><td>CAN TX — straight through, <b>not</b> a crossover like the GPS UART</td></tr>
-          <tr><td class="mono">D9</td><td class="mono">GPIO8</td><td>SN65HVD230 <span class="mono">CRX</span></td><td>CAN RX — 250 kbit/s, listen-only (ESP32-S3 TWAI controller)</td></tr>
-          <tr><td class="mono">D0, D3, D10</td><td class="mono">—</td><td><em>free</em></td><td>Former NeoPixel / SD pins — e-bike edition uses neither</td></tr>
-          <tr><td class="mono">5V (VUSB)</td><td>—</td><td><b>5 V BEC</b> +out (from the bike)</td><td>Power in — no battery; the puck boots with the bike. USB-C is for flashing only</td></tr>
-          <tr><td class="mono">GND</td><td>—</td><td>BEC −out + all module GND</td><td>Common ground — also the bike's ground via the BEC, so the CAN tap needs no extra ground wire</td></tr>
-          <tr><td class="mono">3V3</td><td>—</td><td>All module VCC (CAN, Gravity, OLED, GPS)</td><td>3.3 V rail off the XIAO regulator</td></tr>
+          <tr><td class="mono">D4</td><td class="mono">GPIO5</td><td>10DOF <span class="mono">SDA</span> (Gravity blue)<span class="got-note">+ OLED SDA on Full</span></td><td>I²C data — BNO055 <span class="mono">0x28</span> + BMP280 <span class="mono">0x76</span> (+ SSD1306 <span class="mono">0x3C</span> on Full). The XIAO default pad</td><td>both</td></tr>
+          <tr><td class="mono">D5</td><td class="mono">GPIO6</td><td>10DOF <span class="mono">SCL</span> (Gravity green)<span class="got-note">+ OLED SCK on Full</span></td><td>I²C clock — <b>run at 100 kHz</b>, see below (400 kHz burst for OLED frames only)</td><td>both</td></tr>
+          <tr><td class="mono">D8</td><td class="mono">GPIO7</td><td>SN65HVD230 <span class="mono">CTX</span></td><td>CAN TX — straight through, <b>not</b> a crossover like the GPS UART</td><td>both</td></tr>
+          <tr><td class="mono">D9</td><td class="mono">GPIO8</td><td>SN65HVD230 <span class="mono">CRX</span></td><td>CAN RX — 250 kbit/s, listen-only (ESP32-S3 TWAI controller)</td><td>both</td></tr>
+          <tr><td class="mono">5V (VUSB)</td><td>—</td><td><b>5 V BEC</b> +out (from the bike)</td><td>Power in — no battery; the puck boots with the bike. USB-C is for flashing only</td><td>both</td></tr>
+          <tr><td class="mono">GND</td><td>—</td><td>BEC −out + all module GND</td><td>Common ground — also the bike's ground via the BEC, so the CAN tap needs no extra ground wire</td><td>both</td></tr>
+          <tr><td class="mono">3V3</td><td>—</td><td>All module VCC — CAN + Gravity (+ OLED, GPS on Full)</td><td>3.3 V rail off the XIAO regulator</td><td>both</td></tr>
+          <tr><td class="mono">D6 (TX)</td><td class="mono">GPIO43</td><td>GPS <span class="mono">RX</span></td><td>UART 9600→115200 baud</td><td><b>Full</b></td></tr>
+          <tr><td class="mono">D7 (RX)</td><td class="mono">GPIO44</td><td>GPS <span class="mono">TX</span></td><td>UART (NMEA / UBX in)</td><td><b>Full</b></td></tr>
+          <tr><td class="mono">D1</td><td class="mono">GPIO2</td><td>Screen button → GND</td><td>Input, internal pull-up — 12 mm glove button. Click = next screen · 3 s hold = toggle auto-cycling</td><td><b>Full</b></td></tr>
+          <tr><td class="mono">D2</td><td class="mono">GPIO3</td><td>Marker/zero button → GND (HW-483)</td><td>Click = marker · 10 s hold = zero attitude (saved to NVS)</td><td><b>Full</b></td></tr>
+          <tr><td class="mono">D0, D3, D10</td><td class="mono">—</td><td><em>free</em></td><td>Former NeoPixel / SD pins — e-bike edition uses neither. D3 held SDA while the first board's D4 pad was dead (see below)</td><td>—</td></tr>
         </tbody>
       </table>
     </div>
@@ -388,6 +427,12 @@
       The BNO055 stretches the I²C clock in a way ESP32 I²C peripherals handle badly. It's the single most-reported gotcha with this chip. The usual escape is to run the BNO055 over <b>UART</b> instead. The <a href="https://wiki.dfrobot.com/sen0253/">Gravity connector is VCC/GND/SDA/SCL, I²C only</a> — but <b>correction (2026-07-21, verified on the physical V1.0 board):</b> the back-side pad row <em>does</em> break out <span class="mono">PS1</span>/<span class="mono">PS2</span> (plus NBOOT/RST/INT/I2C_ADDR/BL_IND — no SDA/SCL pads), so a UART fallback technically exists via the PS pads. It would strand the I²C-only BMP280 on a separate bus, and the clean 10-minute hammer test made it moot — noted here in case a future revision ever needs it.<br><br>
       Mitigations, in order: drop the bus to <b>100 kHz</b> (<span class="mono">Wire.setClock(100000)</span>), raise the I²C timeout (<span class="mono">Wire.setTimeOut()</span>), keep SDA/SCL runs short with 4.7 kΩ pull-ups. This is workable — but <b>prove it on the breadboard before the case is glued</b> (build step 2).
     </div>
+    <div class="note warn">
+      <b>If every I²C device looks dead at once — check the pad, not the wiring</b>
+      The first XIAO used in this project had its <span class="mono">D4</span> pad <b>clamped low</b>: it read 0 even with the internal pull-up enabled and nothing attached, shorted to ground somewhere on the board. An I²C line that cannot idle high is a bus no device can ever signal on, so the symptom is <em>four</em> simultaneously dead sensors — which reads like a wiring disaster or four bad modules, not one bad pin. SDA ran on <span class="mono">D3</span> as a workaround until that board was replaced; the pin map above is back on the default pads.<br><br>
+      <b>How to tell a dead pad from a wiring fault:</b> pull the pin up, then down, and read it back. A pad the chip still controls follows both (1 then 0). One that reads 0 against the internal pull-up is being held to ground by something outside the GPIO. Sweep the whole pad row rather than testing one pin — a single pin reading oddly is a story about a broken test, but the same test passing on six neighbours and failing on one names the fault. <span class="mono">padSweep()</span> in <span class="mono">firmware/bench_imu_can/</span> does exactly this on every boot, and <span class="mono">firmware/i2c_diag/</span> localises it further with normal and swapped bus scans.
+    </div>
+
     <div class="note">
       <b>Run it 6-axis (IMU mode), not 9-axis (NDOF)</b>
       NDOF mode needs a calibrated magnetometer. On a motorcycle — steel frame, alternator, speaker magnets — that calibration is junk and yaw will wander. You don't need it: <b>Tripper takes heading from GPS</b>, and the reference-quaternion math makes absolute yaw irrelevant. <span class="mono">OPERATION_MODE_IMUPLUS</span> sidesteps the BNO055's worst weakness. The magnetometer is the one part of this board you paid for and won't use.
@@ -453,6 +498,7 @@
     <div class="sec-head">
       <h2>Build sequence</h2>
       <p>Bench-verify every module <em>before</em> final soldering — debugging inside a stacked sandwich is misery.</p>
+      <p><b>Light build:</b> steps 1, 2, 3, 5, 6, 7, 8, 9 — <b>skip step 4 (GPS)</b> entirely. <b>Full build:</b> all nine in order. Because the Full build is additive, you can ship a Light build now and come back to step 4 later without unsoldering anything.</p>
     </div>
     <ol class="steps">
       <li>
@@ -471,7 +517,7 @@
         <p><b>✅ Passed 2026-07-21</b> — library path up in IMUPLUS, live quaternions + linear accel on the breadboard (test sketch since folded into <span class="mono">firmware/tripper_puck/</span>). Bonus: MON-VER unmasked the "NEO-M8Z" GPS as genuine u-blox 8 silicon (ROM 3.01, SPG 3.01, PROTVER 18, GPS/GLO/BDS/QZSS).</p>
       </li>
       <li>
-        <h3>Get a GPS fix</h3>
+        <h3>Get a GPS fix <em>— Full build only, skip for Light</em></h3>
         <p>Wire GPS to UART, run a TinyGPS++ example <b>near a window or outside</b> — first cold fix can take 1–5 min. Then send the UBX commands to raise the rate to 5–10 Hz and baud to 115200 (one-time config, saved to the module's flash/battery-backed RAM).</p>
         <p><b>✅ Fix acquired 2026-07-21</b> — NMEA + TinyGPS++ verified, MON-VER confirms genuine u-blox 8 (ROM 3.01, PROTVER 18, GPS/GLO/BDS/QZSS). Config applied &amp; verified same day (<span class="mono">firmware/gps_config_5hz/</span>): CFG-RATE 200 ms ACKed, read-back confirmed, saved to BBR, measured 5.0 GGA/s at 115200. Production firmware re-applies at every boot in case the backup battery ever drains. Bench extra that got promoted: 0.91" SSD1306 OLED at <span class="mono">0x3C</span> on the shared I²C bus — now integral to <span class="mono">firmware/tripper_puck/</span> (clock/data screens, hold toggle, zero progress UI).</p>
       </li>
@@ -483,7 +529,7 @@
       </li>
       <li>
         <h3>Integrate the firmware</h3>
-        <p>Combine into the main sketch (architecture below). Bench-test auto-record by shaking + walking outside.</p>
+        <p>Flash the sketch for your build — <span class="mono">firmware/tripper_light/</span> or <span class="mono">firmware/tripper_puck/</span> (architecture below). Bench-test by shaking the puck and watching the telemetry stream in a BLE scanner. The Light build needs only <span class="mono">Adafruit BNO055</span>, <span class="mono">Adafruit BMP280</span> and <span class="mono">NimBLE-Arduino</span>; the Full build adds <span class="mono">Adafruit SSD1306</span> and <span class="mono">TinyGPSPlus</span>.</p>
         <p><b>✅ e-bike edition firmware running (2026-07-21, CAN added 2026-07-23)</b> — <span class="mono">firmware/tripper_puck/</span>: BLE service (telemetry 5 Hz / status 1 Hz / control), OLED screens (clock / data / bike-CAN, stepped by D1), marker button, 10 s mount-zero (reference quaternion, persisted to NVS, applied to display <em>and</em> telemetry), GPS autoconfig at boot, and listen-only CAN folded into the 70-byte telemetry packet. Phone-verified with LightBlue: connect, notify stream, control writes all working.</p>
       </li>
       <li>
@@ -492,13 +538,14 @@
           <li>Shorten all wires to final lengths; silicone wire tolerates vibration best.</li>
           <li>BEC +out → the XIAO 5V (VUSB) pin, BEC −out → GND. Heat-shrink everything; the BEC's input taps the bike's pack / accessory line.</li>
           <li>Put a <b>2-pin connector in the CANH/CANL run</b> so you can isolate the bike before ever attaching USB to flash.</li>
-          <li>Both buttons in the lid; the OLED window plus the SN65HVD230 on its own short pigtail.</li>
+          <li>The SN65HVD230 on its own short pigtail. <b>Full build only:</b> both buttons in the lid plus the OLED window.</li>
         </ul>
       </li>
       <li>
         <h3>Enclosure &amp; mounting</h3>
         <ul>
-          <li>Two enclosures, split rear / handlebar: the ESP32, CAN module and sensor board ride at the rear near the controller tap; the OLED, two buttons and GPS sit at the handlebar.</li>
+          <li><b>Light build — one enclosure</b> at the rear near the controller tap: ESP32, CAN module, sensor board. Nothing goes on the handlebar, so there is no second case, no bar cabling and no antenna placement problem.</li>
+          <li><b>Full build — two enclosures</b>, split rear / handlebar: the ESP32, CAN module and sensor board ride at the rear; the OLED, two buttons and GPS sit at the handlebar (the GPS wants sky view, the screen wants your eyeline).</li>
           <li>Print a two-part case ≈ 55 × 40 × 22 mm; cutouts: USB-C (flashing), two buttons, the OLED window, and the CAN + BEC leads. Search "XIAO ESP32S3 GPS logger case" on Printables for starting points.</li>
           <li>Sensor board sits on the 2 mm foam pad — isolates handlebar buzz from the accelerometer.</li>
           <li>GPS antenna under a 1.5 mm lid section (plastic is RF-transparent), ESP32 at the opposite end.</li>
@@ -507,7 +554,8 @@
       </li>
       <li>
         <h3>Field-verify against Tripper</h3>
-        <p>Ride with the puck and the phone app recording simultaneously. Distances should agree within a few percent; the puck's 5 Hz track should look <em>smoother</em> in corners, and the CAN block should carry live battery %, pack voltage and ride mode. Compare in the app — the BLE stream is the only data path, there is no file to import.</p>
+        <p>Ride with the puck and the phone app recording simultaneously. The CAN block should carry live battery %, pack voltage, ride mode and regen level, and orientation should track the bike's lean. Compare in the app — the BLE stream is the only data path, there is no file to import.</p>
+        <p><b>Full build:</b> distances should agree within a few percent and the puck's 5 Hz track should look <em>smoother</em> in corners than the phone's 1 Hz. <b>Light build:</b> position comes from the phone, so there is no second track to compare — verify instead that orientation, g-force, barometric altitude and the whole CAN block land in the recording, and that <span class="mono">caps</span> reads <span class="mono">0x08</span> so the app knows to keep using phone GPS.</p>
       </li>
     </ol>
   </section>
@@ -516,27 +564,34 @@
   <section>
     <div class="sec-head">
       <h2>Firmware architecture</h2>
-      <p>Arduino (C++). One loop, three rates, no RTOS needed.</p>
+      <p>Arduino (C++). One loop, three rates, no RTOS needed. Two sketches: <span class="mono">tripper_light/</span> and <span class="mono">tripper_puck/</span>.</p>
+    </div>
+
+    <div class="note">
+      <b>Two sketches, one wire format</b>
+      <span class="mono">tripper_puck/</span> is the Full build. <span class="mono">tripper_light/</span> is the same firmware with the GPS, OLED and button code removed outright — not disabled by a flag, so the Light build carries no dead weight and needs two fewer libraries. What stays identical: service UUIDs, the 70-byte telemetry packet, the 14-byte status packet, and the whole CAN decode.<br><br>
+      A Light puck fills the GPS block with zeros and leaves both <span class="mono">flags</span> bits clear — indistinguishable from a Full puck that hasn't got a fix yet, which the app already handles — so <b>no app branch is required</b>. The status packet's last byte, previously <span class="mono">reserved</span>, now carries capability bits: <span class="mono">0x08</span> from Light, <span class="mono">0x0F</span> from Full. Zero means firmware older than the field, which is why "has CAN" is an explicit bit rather than assumed.<br><br>
+      <b>The cost of two sketches is drift.</b> Each is standalone, so the packet structs and CAN decode exist twice. Anything touching the wire format must land in both — <span class="mono">README.md</span> → Build &amp; flash carries a one-liner that diffs the two field lists and should print nothing.
     </div>
 
     <h3>Libraries</h3>
     <div class="tablewrap">
       <table>
-        <thead><tr><th>Library</th><th>For</th></tr></thead>
+        <thead><tr><th>Library</th><th>For</th><th>Build</th></tr></thead>
         <tbody>
-          <tr><td class="mono">Adafruit BNO055 + Adafruit Unified Sensor</td><td>Quaternions, linear accel &amp; gravity vector at 100 Hz — fusion runs on the chip</td></tr>
-          <tr><td class="mono">TinyGPSPlus</td><td>NMEA parsing (lat/lon/alt/speed/course/hdop/time)</td></tr>
-          <tr><td class="mono">Adafruit BMP280</td><td>BMP280 pressure → altitude</td></tr>
-          <tr><td class="mono">Adafruit SSD1306 + Adafruit GFX</td><td>0.91" OLED — clock / data / bike-CAN screens</td></tr>
-          <tr><td class="mono">NimBLE-Arduino</td><td>BLE link to the Tripper app</td></tr>
-          <tr><td class="mono">driver/twai.h <i>(ESP-IDF, bundled)</i></td><td>On-chip CAN controller — listen-only, no external library</td></tr>
-          <tr><td class="mono">Preferences <i>(bundled)</i></td><td>Persist the mount-zero reference quaternion to NVS</td></tr>
+          <tr><td class="mono">Adafruit BNO055 + Adafruit Unified Sensor</td><td>Quaternions, linear accel &amp; gravity vector at 100 Hz — fusion runs on the chip</td><td>both</td></tr>
+          <tr><td class="mono">Adafruit BMP280</td><td>BMP280 pressure → altitude</td><td>both</td></tr>
+          <tr><td class="mono">NimBLE-Arduino</td><td>BLE link to the Tripper app</td><td>both</td></tr>
+          <tr><td class="mono">driver/twai.h <i>(ESP-IDF, bundled)</i></td><td>On-chip CAN controller — listen-only, no external library</td><td>both</td></tr>
+          <tr><td class="mono">Preferences <i>(bundled)</i></td><td>Persist the mount-zero reference quaternion to NVS</td><td>both</td></tr>
+          <tr><td class="mono">TinyGPSPlus</td><td>NMEA parsing (lat/lon/alt/speed/course/hdop/time)</td><td><b>Full</b></td></tr>
+          <tr><td class="mono">Adafruit SSD1306 + Adafruit GFX</td><td>0.91" OLED — clock / data / bike-CAN screens</td><td><b>Full</b></td></tr>
         </tbody>
       </table>
     </div>
 
     <h3>Main loop (rates)</h3>
-<pre><code>every pass  GPS: drain the UART into TinyGPS++
+<pre><code>every pass  GPS: drain the UART into TinyGPS++        (Full only)
            CAN: drain the TWAI RX queue (bounded to 16 frames/pass),
                 latch the newest payload of each decoded ID
 
@@ -553,16 +608,19 @@
 
     <p>No SD, no CSV, no auto-record state machine — those moved to the phone. The puck is a stateless sensor: it streams, the app records and decides when a ride is running (and tells the puck over the <span class="mono">control</span> characteristic, which is what flips the OLED into trip-time mode).</p>
 
-    <h3>Buttons</h3>
+    <h3>Buttons — Full build only</h3>
+    <p>The Light build has none: a marker arrives as control write <span class="mono">0x01</span> and mount-zero as <span class="mono">0x02</span>, both from the app. On Full, <span class="mono">0x01</span> is only an <em>ack</em> for a press the button already counted; on Light it originates the marker, since nothing else can.</p>
     <p>Both sit on pin-change ISRs with 50 ms debounce, so presses land even while the loop is stalled. Each discriminates click from hold the same way: the ISR timestamps the press and counts a click only if the release lands inside 600 ms, so a long hold never also fires a click.</p>
     <p><b>D1 (12 mm glove button)</b> — click steps to the next OLED screen · 3 s hold toggles auto-cycling. Screens do <em>not</em> rotate on their own by default: on a moving bike the screen you picked should stay put.</p>
     <p><b>D2 (HW-483)</b> — click drops a marker into the telemetry packet · 10 s hold zeroes roll/pitch/yaw and saves the reference quaternion to NVS.</p>
 
-    <h3>Status — all on the OLED</h3>
+    <h3>Status — all on the OLED (Full build)</h3>
+    <p>The Light build has no indicator at all — not even a status LED — so everything below is Full-only. That is deliberate rather than a gap: the phone is already in the rider's pocket running the app, and the OLED exists to save you pulling it out. A Light puck reports its health entirely through the 1 Hz BLE status packet.</p>
     <p>There is no status LED (the NeoPixel was dropped). Everything reads off the 0.91" screen: a fix dot (hollow → solid on lock), <span class="mono">LINK</span>/<span class="mono">ADV</span> for the BLE state, satellite bars, MARK and ZEROED splashes, and the bike-CAN screen's own <span class="mono">no data</span> / <span class="mono">off</span> indicator. During a ride (app-driven) the whole display inverts and a trip-time screen joins the rotation.</p>
 
     <h3>On-air format — the BLE telemetry packet</h3>
     <p>There is no file. The data leaves as a 70-byte packed little-endian sample notified at 5 Hz — GPS, quaternion, linear/​max g, marker, then the bike-CAN block (speed, rpm, power, current, pack voltage, battery %, throttle demand, cell high/low, kickstand, ride mode, regen level). The app's <span class="mono">ExternalSensorSource</span> feeds it into the same recorder pipeline the phone sensors use. Full offset table: see <span class="mono">README.md</span> → BLE protocol.</p>
+    <p><b>Identical on both builds</b>, byte for byte. On a Light puck the GPS fields are zero and <span class="mono">flags</span> bits 0–1 are clear, <span class="mono">gpsTimeMs</span> is <span class="mono">0xFFFFFFFF</span> and <span class="mono">hdop_c</span> is 9999 — the app must gate on those bits anyway, because a Full puck looks the same indoors. Read <span class="mono">caps</span> in the status packet to know whether position will ever arrive, and fall back to phone GPS when bit <span class="mono">0x01</span> is clear.</p>
   </section>
 
   <!-- ============================================================ -->

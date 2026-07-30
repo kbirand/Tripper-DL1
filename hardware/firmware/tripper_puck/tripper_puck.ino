@@ -40,12 +40,13 @@
 #include <driver/twai.h>
 
 // ---------- pins & constants ----------
-// I2C is on D3/D5, not the D4/D5 the Wire default would pick: on this XIAO the
-// D4 pad sits clamped low — it reads 0 even against the internal pull-up with
-// nothing attached — so SDA can never idle high there and no device can signal.
-// D3 was free (see the README pin map) and tests clean. Verified with
-// bench_imu_can: both lines float high, 0x28 and 0x76 enumerate, 0 bus errors.
-#define PIN_SDA      D3
+// I2C on the XIAO's default pads. Stated explicitly rather than relying on a
+// bare Wire.begin() because this project has already been bitten once: the
+// first board's D4 pad was clamped low — it read 0 even against the internal
+// pull-up with nothing attached — so SDA could never idle high and all four
+// sensors looked dead. That board was replaced; if the symptom ever returns,
+// bench_imu_can prints both line states at boot and i2c_diag localises it.
+#define PIN_SDA      D4
 #define PIN_SCL      D5
 #define PIN_BUTTON   D1
 #define PIN_BUTTON2  D2        // screen hold / attitude zero
@@ -58,6 +59,16 @@
 #define ZERO_HOLD_MS 10000UL   // button 2 held to here = capture the mount reference
 #define CYCLE_HOLD_MS 3000UL   // button 1 held to here = toggle auto-cycling
 #define SCREEN_MS    5000UL    // dwell per screen while auto-cycling
+
+// Capability bits, reported in StatusPacket::caps, so the app can tell which
+// build it is talking to — a Light puck has no GPS and the phone must supply
+// position. Zero means firmware older than the field, not "no capabilities",
+// which is why CAP_CAN is a bit rather than assumed.
+#define CAP_GPS      0x01
+#define CAP_OLED     0x02
+#define CAP_BUTTONS  0x04
+#define CAP_CAN      0x08
+#define BUILD_CAPS   (CAP_GPS | CAP_OLED | CAP_BUTTONS | CAP_CAN)
 
 static const char *SVC_UUID  = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70001";
 static const char *TELE_UUID = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70002";
@@ -109,7 +120,7 @@ struct __attribute__((packed)) StatusPacket {
   uint32_t uptime_s;
   int16_t  temp_x10;     // BMP280 °C * 10
   uint8_t  marker;
-  uint8_t  reserved;
+  uint8_t  caps;         // was `reserved` (always 0) — now the capability bits
 };
 static_assert(sizeof(StatusPacket) == 14, "status packet size drifted");
 
@@ -848,6 +859,7 @@ void loop() {
     s.uptime_s = now / 1000;
     s.temp_x10 = (int16_t)(lastTempC * 10);
     s.marker = markerCount;
+    s.caps = BUILD_CAPS;                // tells the app this is the Full build
     chStat->setValue((uint8_t *)&s, sizeof(s));
     if (bleServer->getConnectedCount() > 0) chStat->notify();
     float dbgR, dbgP, dbgY;

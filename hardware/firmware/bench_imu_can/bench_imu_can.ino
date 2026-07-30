@@ -46,14 +46,16 @@
 #include <driver/twai.h>
 
 // ---------- pins & constants ----------
-// SDA moved off D4: that line read low even against the ESP32's internal
-// pull-up, so it can never idle high and no device can signal on it. D3 is
-// one of the three free pins in the README pin map (D0, D3, D10), and the
-// ESP32's GPIO matrix puts I2C anywhere. SCL stays on D5, which tested clean.
+// I2C on the XIAO's default pads. SDA lived on D3 for a while because the
+// first board's D4 pad was clamped low — it read 0 even against the internal
+// pull-up with nothing attached, so SDA could never idle high and every sensor
+// looked dead. That board was replaced and D4 is back in use.
 //
-// This doubles as the localization test: if D3 comes up clamped too, the
-// short is in the harness or the module, not the pad.
-#define PIN_SDA      D3
+// The pad sweep below is what diagnosed it, and it still runs on every boot: a
+// pad the chip controls follows both internal pulls, so a clamped one stands
+// out against its neighbours. Keeping the sweep is the point of this sketch —
+// if the symptom ever comes back, it names the pin in one line.
+#define PIN_SDA      D4
 #define PIN_SCL      D5
 #define CAN_TX_GPIO  GPIO_NUM_7   // D8 -> SN65HVD230 CTX
 #define CAN_RX_GPIO  GPIO_NUM_8   // D9 <- SN65HVD230 CRX
@@ -434,7 +436,7 @@ void reportBnoHealth() {
 // Pull each pad up, then down, and read it back. A pad the chip still controls
 // follows the pull both ways and reads 1/0. Anything else is tied by something
 // outside the GPIO: 0/0 is held to ground, 1/1 is held high — which is what a
-// populated I2C bus looks like, and why D3/D5 are in the sweep as controls.
+// populated I2C bus looks like, and why D4/D5 are in the sweep as controls.
 //
 // Sweeping the whole row at once is the point. A single pin reading oddly is a
 // story about a broken test; the same test passing on six neighbours and
@@ -486,15 +488,9 @@ void setup() {
   Wire.setClock(100000);                // BNO055 clock-stretch safe
   Wire.setTimeOut(1000);
 
-  Serial.printf("[i2c] SDA=GPIO%d (D3)  SCL=GPIO%d (D5)\n", PIN_SDA, PIN_SCL);
-  // Keep watching the pad SDA used to live on. If D4 comes back high once the
-  // wire is off it, the pad was never the problem and the clamp travels with
-  // the harness; if it stays low with nothing attached, the pad really is dead.
-  pinMode(D4, INPUT_PULLUP);
-  delayMicroseconds(200);
-  int d4 = digitalRead(D4);
-  Serial.printf("[i2c] old SDA pad D4 (pulled up) = %d%s\n", d4,
-                d4 ? "  (clear — clamp is not the pad)" : "  <-- still clamped low");
+  Serial.printf("[i2c] SDA=GPIO%d (D4)  SCL=GPIO%d (D5)\n", PIN_SDA, PIN_SCL);
+  // The separate "old SDA pad" watch is gone: SDA is back on D4, so padSweep()
+  // and busLinesHigh() already report that pin every boot.
 
   // Electrical state first, then who answers. On a clamped bus every probe
   // burns the full Wire timeout, so scanning all 126 addresses costs over two
