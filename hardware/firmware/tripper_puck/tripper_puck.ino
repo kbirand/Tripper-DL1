@@ -216,16 +216,6 @@ void saveQRef() {
   prefs.putFloat("qy", qRef.y()); prefs.putFloat("qz", qRef.z());
 }
 
-imu::Quaternion qRel() {                // qRef⁻¹ ⊗ q (unit quat: conj == inverse)
-  double rw = qRef.w(), rx = -qRef.x(), ry = -qRef.y(), rz = -qRef.z();
-  const imu::Quaternion &q = lastQuat;
-  return imu::Quaternion(
-      rw * q.w() - rx * q.x() - ry * q.y() - rz * q.z(),
-      rw * q.x() + rx * q.w() + ry * q.z() - rz * q.y(),
-      rw * q.y() - rx * q.z() + ry * q.w() + rz * q.x(),
-      rw * q.z() + rx * q.y() - ry * q.x() + rz * q.w());
-}
-
 void quatToEuler(const imu::Quaternion &q, float &rollDeg, float &pitchDeg, float &yawDeg) {
   double sinr = 2.0 * (q.w() * q.x() + q.y() * q.z());
   double cosr = 1.0 - 2.0 * (q.x() * q.x() + q.y() * q.y());
@@ -237,6 +227,37 @@ void quatToEuler(const imu::Quaternion &q, float &rollDeg, float &pitchDeg, floa
   double siny = 2.0 * (q.w() * q.z() + q.x() * q.y());
   double cosy = 1.0 - 2.0 * (q.y() * q.y() + q.z() * q.z());
   yawDeg = atan2(siny, cosy) * 57.29578;
+}
+
+// Strips yaw off a quaternion, keeping its tilt. IMUPLUS has no magnetometer,
+// so yaw free-runs from wherever the puck happened to point at power-on: it is
+// not a measurement and must never reach the mount reference.
+imu::Quaternion tiltOnly(const imu::Quaternion &q) {
+  float r, p, y;
+  quatToEuler(q, r, p, y);
+  const double H = 0.0087266462;        // deg -> rad, halved
+  double cr = cos(r * H), sr = sin(r * H);
+  double cp = cos(p * H), sp = sin(p * H);
+  return imu::Quaternion(cr * cp, sr * cp, cr * sp, -sr * sp);   // ZYX, yaw = 0
+}
+
+// q ⊗ qRef⁻¹ — the mount correction applied on the BODY side (unit quat:
+// conj == inverse). It has to be this way round. Yaw error is a rotation about
+// the world vertical, so it enters on the left (q = qYaw(δ) ⊗ qTrue); a
+// reference applied on the left too would sit the drift *between* itself and
+// the attitude, and its tilt would no longer cancel the mount tilt — leaving a
+// residual that rotates with δ and swamps the real lean. Applied on the right,
+// the drift stays outermost, and a left-multiplied yaw leaves the ZYX roll and
+// pitch untouched: lean and slope come out immune to both the boot origin and
+// gyro drift.
+imu::Quaternion qRel() {
+  const imu::Quaternion &a = lastQuat;
+  double bw = qRef.w(), bx = -qRef.x(), by = -qRef.y(), bz = -qRef.z();
+  return imu::Quaternion(
+      a.w() * bw - a.x() * bx - a.y() * by - a.z() * bz,
+      a.w() * bx + a.x() * bw + a.y() * bz - a.z() * by,
+      a.w() * by - a.x() * bz + a.y() * bw + a.z() * bx,
+      a.w() * bz + a.x() * by - a.y() * bx + a.z() * bw);
 }
 
 // ---------- GPS bring-up (idempotent, runs every boot) ----------
@@ -625,6 +646,10 @@ void setup() {
   prefs.begin("puck", false);           // load the mount reference, if ever zeroed
   qRef = imu::Quaternion(prefs.getFloat("qw", 1.0f), prefs.getFloat("qx", 0.0f),
                          prefs.getFloat("qy", 0.0f), prefs.getFloat("qz", 0.0f));
+  // References saved by builds that stored yaw carry a yaw from a *previous*
+  // boot's origin, which is meaningless now. The tilt half is still good, so
+  // strip rather than discard: an already-zeroed puck needs no re-zero.
+  qRef = tiltOnly(qRef);
 
   Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(100000);
@@ -747,7 +772,7 @@ void loop() {
   b2Prev = b2Down;
   if (b2Down && !zeroFired && now - b2FallAt >= ZERO_HOLD_MS) {
     zeroFired = true;
-    qRef = lastQuat;                    // this orientation is the new zero
+    qRef = tiltOnly(lastQuat);          // this orientation's TILT is the new zero
     saveQRef();
     zeroSplashUntil = now + 1500;
     tOled = 0;
@@ -756,7 +781,7 @@ void loop() {
   if (bleZeroReq) {                     // 0x02 from the app — same capture as the hold
     bleZeroReq = false;
     if (imuOk) {
-      qRef = lastQuat;
+      qRef = tiltOnly(lastQuat);
       saveQRef();
       zeroSplashUntil = now + 1500;
       tOled = 0;
