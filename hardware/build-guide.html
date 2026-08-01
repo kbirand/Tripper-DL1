@@ -482,6 +482,12 @@
       NDOF mode needs a calibrated magnetometer. On a motorcycle — steel frame, alternator, speaker magnets — that calibration is junk and yaw will wander. You don't need it: <b>Tripper takes heading from GPS</b>, and the reference-quaternion math makes absolute yaw irrelevant. <span class="mono">OPERATION_MODE_IMUPLUS</span> sidesteps the BNO055's worst weakness. The magnetometer is the one part of this board you paid for and won't use.
     </div>
     <div class="note warn">
+      <b>IMUPLUS makes the accelerometer load-bearing — calibrate it</b>
+      Six-axis is the right mode, but it removes the magnetometer, and with it the only other absolute reference. <b>The accelerometer is then the only thing that knows where down is</b>, and every lean and slope number is anchored to it. An uncalibrated one does not fail loudly; it biases attitude quietly for the whole ride.
+      <br><br>
+      So: call <span class="mono">setExtCrystalUse(true)</span> — the fusion modes want the board's 32.768 kHz crystal, not the internal RC oscillator — read <span class="mono">getCalibration()</span>, and do not accept a mount zero until the accelerometer reads 3/3. Save the offsets with <span class="mono">getSensorOffsets()</span> once they get there and restore them at boot, so it is a once-per-chip chore rather than once-per-ride. To calibrate: leave the bike still and upright on level ground for a few seconds. No waving about — that dance is for the magnetometer, which this mode never uses.
+    </div>
+    <div class="note warn">
       <b>Antenna rule (this decides your GPS quality)</b>
       Mount the GPS patch antenna at the top of the <b>handlebar</b> enclosure, facing the sky. The ≥ 15 mm separation from the ESP32 comes free now that the module lives at the rear — but keep it clear of the OLED ribbon and the USB cable too.
     </div>

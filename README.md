@@ -389,7 +389,7 @@ done; diff /tmp/tripper_puck.f /tmp/tripper_light.f && echo "packets agree"
 | Screen button (D1) click | Step to the next OLED screen |
 | Screen button (D1) 3 s hold | Toggle auto-cycling (thin border = cycling) |
 | Marker button (D2) click | Marker counter++ in telemetry · MARK splash |
-| Marker button (D2) 10 s hold | Zero roll/pitch/yaw at current orientation (progress bar → ZEROED) |
+| Marker button (D2) 10 s hold | Zero the mount at the current orientation (progress bar → ZEROED, or `ACC n/3` if the accelerometer isn't calibrated yet) |
 
 The Light build has no buttons and no screen: markers arrive as control write
 `0x01` and mount-zero as `0x02`, both from the app. Everything below describes
@@ -422,11 +422,11 @@ Device name `Tripper-DL1`. One service, three characteristics:
 | `…0003` | status | notify + read, 1 Hz, 14 B |
 | `…0004` | control | write / write-no-response |
 
-### Telemetry packet (70 bytes, little-endian, packed)
+### Telemetry packet (77 bytes, little-endian, packed)
 
 | Offset | Type | Field | Notes |
 |---|---|---|---|
-| 0 | u8 | ver | `0x02` — `0x01` was the 50-byte pre-CAN packet |
+| 0 | u8 | ver | `0x03` — `0x02` was the 70-byte packet with no IMU health, `0x01` the 50-byte pre-CAN one |
 | 1 | u8 | flags | bit0 fix valid · bit1 time valid |
 | 2 | u32 | gpsTimeMs | UTC ms-of-day, `0xFFFFFFFF` if invalid |
 | 6 | i32 | lat_e7 | degrees × 1e7 |
@@ -454,6 +454,8 @@ Device name `Tripper-DL1`. One service, three characteristics:
 | 66 | u8 | cellHi_idx | its index, 1–16 |
 | 67 | u16 | cellLo_mv | lowest cell, mV |
 | 69 | u8 | cellLo_idx | its index, 1–16 |
+| 70 | i16×3 | gyr x y z | raw gyro, deg/s × 16 (sensor frame) |
+| 76 | u8 | calib | bits 7:6 sys · 5:4 gyro · 3:2 accel · 1:0 mag, each 0–3 |
 
 Bytes 50–69 are the bike's CAN bus, read listen-only from a SN65HVD230 on
 D8/D9 (see [Bike CAN bus](#bike-can-bus-talaria)). **The whole block is zeroed
@@ -465,6 +467,13 @@ cable look identical.
 Note `speed_cmps` at offset 26 is GPS ground speed in cm/s; `canSpeed_dkph`
 at 51 is the bike's own wheel speed in 0.1 km/h. They are independent
 measurements and will disagree — wheelspin, GPS lag, tyre circumference.
+
+Bytes 70–76 are IMU health, appended *after* the CAN block so every `0x02`
+offset stays byte-identical and an older app keeps parsing. They exist because
+raw gyro and calibration used to stay on the puck — which is why a lean fault
+took a GPS cross-check to diagnose rather than a look at the recording. `mag` is
+always 0: IMUPLUS never turns the magnetometer on. See
+[IMU calibration](#imu-calibration) for what the numbers mean.
 
 ### Status packet (14 bytes)
 
@@ -491,11 +500,48 @@ explicit bit rather than assumed.
 | Byte | Payload | Action |
 |---|---|---|
 | `0x01` | — | **Full:** marker ack — MARK splash on the OLED (the button already counted it). **Light:** originates the marker, incrementing the counter — there is no button |
-| `0x02` | — | Zero roll/pitch/yaw at the current orientation — same as the 10 s button hold on Full, the only way to do it on Light. Saved to flash on both |
+| `0x02` | — | Zero the mount at the current orientation — same as the 10 s button hold on Full, the only way to do it on Light. Saved to flash on both. Refused while accel calibration is under 3/3 |
 | `0x03` | — | Identify — **Full:** OLED inverts for 2 s. **Light:** accepted and logged, no indicator to flash |
 | `0x04` | `active u8 · elapsed_s u32` | Ride state — **Full:** inverts the OLED and adds the trip-time screen, elapsed seeds the timer. **Light:** accepted and logged, no display. The app re-sends it on every reconnect |
 
 Both builds accept all four opcodes, so the app never has to withhold a write.
+
+## IMU calibration
+
+Both builds run the BNO055 in `OPERATION_MODE_IMUPLUS` — six-axis, no
+magnetometer. That is the right choice on a motorcycle (a steel frame and a
+motor make magnetometer calibration junk, and heading comes from GPS anyway),
+but it has a consequence worth stating plainly:
+
+> **In IMUPLUS the accelerometer is the only thing that knows where down is.**
+> Every lean and slope number the puck produces is anchored to it. An
+> uncalibrated accelerometer doesn't fail loudly — it biases attitude quietly,
+> for the whole ride.
+
+So the firmware now:
+
+- calls `setExtCrystalUse(true)`. The Gravity board carries a 32.768 kHz
+  crystal; without this the fusion runs on the internal RC oscillator, which
+  Bosch does not consider adequate for the fusion modes
+- reads `getCalibration()` at 1 Hz and puts it in the telemetry packet
+- **refuses a mount zero while accel calibration is under 3/3** — the OLED shows
+  `ACC n/3` instead of `ZEROED`, and the app disables its zero button and says
+  why (a Light puck has no screen, so the app is the only place it can)
+- saves the offsets to flash the first time calibration reaches 3/3 and restores
+  them at every boot
+- rejects any `getQuat()` that isn't a unit quaternion, counting the drops as
+  `qrej` in the serial line — a climbing count means the I²C run is marginal
+
+**Calibrating from cold:** leave the bike still and upright on level ground for
+a few seconds. Accelerometer and gyro both settle without any waving about —
+that dance is for the magnetometer, which this mode never uses. Watch `cal=` in
+the serial debug line, or the app's *IMU calibration* row. It is a once-per-chip
+chore, not once-per-ride, because the offsets persist.
+
+**Reading the debug line** — `cal=321` is sys 3, gyro 2, accel 1. Only the last
+two matter here; `sys` stays low in IMUPLUS and is not a fault. `gz=` is the raw
+yaw rate: on a straight road it should sit near zero, and a steady non-zero
+reading is gyro bias, which is what makes attitude wander.
 
 ## Bike CAN bus (Talaria)
 

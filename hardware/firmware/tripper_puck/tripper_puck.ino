@@ -6,7 +6,7 @@
 //
 //   100 Hz  BNO055 quaternion + linear accel (IMUPLUS), latch interval max-g
 //   5 Hz    GPS epochs (module pre-configured; re-configured at every boot)
-//   5 Hz    BLE telemetry notify (70-byte packed sample)
+//   5 Hz    BLE telemetry notify (77-byte packed sample)
 //   1 Hz    BLE status notify, baro sample, serial debug line
 //   2 Hz    OLED refresh — clock / live data / bike CAN (/ trip time)
 //   ~92/s   Talaria CAN frames, listen-only (SN65HVD230 on D8/D9)
@@ -17,11 +17,14 @@
 // auto-cycling (thin border = cycling). Screens do NOT rotate on their own by
 // default — on a moving bike the screen you picked should stay put.
 // Button 2 (D2→GND): click = marker, bumps a counter in the telemetry packet ·
-// 10 s hold = zero roll/pitch/yaw at the mounted orientation — reference
-// quaternion saved to flash, survives reboots, and the BLE telemetry
-// quaternion is re-referenced the same way.
-// Control writes: 0x01 = marker ack flash · 0x02 = zero roll/pitch/yaw (same
-// as the button 2 long-hold, triggered from the app) · 0x03 = identify (LED
+// 10 s hold = zero the mount at the current orientation — reference quaternion
+// saved to flash, survives reboots, and the BLE telemetry quaternion is
+// re-referenced the same way. Refused until the BNO055 reports accelerometer
+// calibration 3/3: in IMUPLUS the accelerometer is the only thing that knows
+// where down is, so a zero taken against an uncalibrated one is silently wrong
+// for the whole ride.
+// Control writes: 0x01 = marker ack flash · 0x02 = zero the mount (same as the
+// button 2 long-hold, and refused the same way) · 0x03 = identify (LED
 // rainbow + OLED invert, for picking the right device in a scanner app) ·
 // 0x04 + [active u8][elapsed s u32 LE] = ride state — while active the OLED
 // runs inverted and a third screen (trip time) joins the cycle. The app
@@ -88,7 +91,7 @@ static const char *CTRL_UUID = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70004";
 
 // ---------- packets (little-endian, packed) ----------
 struct __attribute__((packed)) TelemetryPacket {
-  uint8_t  ver;          // 0x01
+  uint8_t  ver;          // 0x03
   uint8_t  flags;        // bit0 fix valid, bit1 time valid
   uint32_t gpsTimeMs;    // UTC ms of day, 0xFFFFFFFF if invalid
   int32_t  lat_e7;       // deg * 1e7
@@ -119,8 +122,15 @@ struct __attribute__((packed)) TelemetryPacket {
   uint8_t  cellHi_idx;      // 1..16     (0x201[4])
   uint16_t cellLo_mv;       // mV        (0x201[2:4])
   uint8_t  cellLo_idx;      // 1..16     (0x201[5])
+  // ---- IMU health (ver 0x03). Appended after the CAN block on purpose, so
+  // every 0x02 offset above stays byte-identical and an older app keeps
+  // parsing. Raw gyro and calibration used to stay on the puck, which is why
+  // an attitude fault took a GPS cross-check to diagnose rather than a look at
+  // the recording. Keep in step with tripper_light.ino.
+  int16_t  gyrx_d16, gyry_d16, gyrz_d16;   // sensor-frame gyro, deg/s * 16
+  uint8_t  calib;        // bits 7:6 sys · 5:4 gyro · 3:2 accel · 1:0 mag
 };
-static_assert(sizeof(TelemetryPacket) == 70, "telemetry packet size drifted");
+static_assert(sizeof(TelemetryPacket) == 77, "telemetry packet size drifted");
 
 struct __attribute__((packed)) StatusPacket {
   uint8_t  ver;          // 0x01
@@ -165,6 +175,13 @@ volatile uint8_t markerCount = 0;
 float maxG_g = 0;                       // latched between telemetry packets
 imu::Quaternion lastQuat;
 imu::Vector<3> lastLin;
+imu::Vector<3> lastGyro;                // sensor frame, deg/s
+// BNO055 calibration, refreshed at 1 Hz. IMUPLUS has no magnetometer, so the
+// accelerometer is the only thing that knows where down is: calAcc is what
+// decides whether a mount zero means anything, and calMag stays 0 forever.
+uint8_t calSys = 0, calGyro = 0, calAcc = 0, calMag = 0;
+bool     calSaved = false;              // offsets already written to flash
+uint32_t quatRejects = 0;               // getQuat() results that weren't unit
 float lastPressPa = 0, lastTempC = 0, lastBaroAlt = 0;
 uint32_t identifyUntil = 0, splashUntil = 0;
 uint32_t tImu = 0, tTele = 0, tStatus = 0, tOled = 0;
@@ -221,6 +238,7 @@ bool rideActive = false;                // phone is recording: invert + trip scr
 uint32_t tripStartMs = 0;               // millis() epoch of the ride (elapsed-adjusted)
 uint32_t zeroSplashUntil = 0;
 bool zeroFired = false;
+bool zeroRefused = false;               // last zero attempt blocked on accel cal
 
 void saveQRef() {
   prefs.putFloat("qw", qRef.w()); prefs.putFloat("qx", qRef.x());
@@ -269,6 +287,27 @@ imu::Quaternion qRel() {
       a.w() * bx + a.x() * bw + a.y() * bz - a.z() * by,
       a.w() * by - a.x() * bz + a.y() * bw + a.z() * bx,
       a.w() * bz + a.x() * by - a.y() * bx + a.z() * bw);
+}
+
+// The single path for "this orientation is now zero", shared by the 10 s hold
+// and the app's 0x02 write. Refused while the accelerometer is uncalibrated:
+// in IMUPLUS it is the only thing that knows where down is, so a zero taken
+// against a bad one is silently wrong for the whole ride. tripper_light gates
+// the same way, and the app checks the calibration byte before it ever sends
+// 0x02 — that matters on the Light build, which has no screen to refuse on.
+void captureZero(uint32_t now, const char *source) {
+  zeroSplashUntil = now + 1500;
+  tOled = 0;
+  if (calAcc < 3) {
+    zeroRefused = true;
+    Serial.printf("[zero] refused (%s): accel calibration %d/3 — leave the bike "
+                  "still and level for a few seconds\n", source, calAcc);
+    return;
+  }
+  zeroRefused = false;
+  qRef = tiltOnly(lastQuat);            // this orientation's TILT is the new zero
+  saveQRef();
+  Serial.printf("[zero] mount reference captured & saved (%s)\n", source);
 }
 
 // ---------- GPS bring-up (idempotent, runs every boot) ----------
@@ -559,6 +598,16 @@ void drawZeroProgress(uint32_t heldMs) {
 void drawZeroedSplash() {
   oled.fillRect(0, 0, 128, 32, SSD1306_WHITE);
   oled.setTextColor(SSD1306_BLACK);
+  if (zeroRefused) {
+    // Tell the rider what to do about it, not just that it failed.
+    oled.setTextSize(2);
+    oled.setCursor(10, 2);
+    oled.printf("ACC %d/3", calAcc);
+    oled.setTextSize(1);
+    oled.setCursor(4, 22);
+    oled.print("hold still, level");
+    return;
+  }
   oled.setTextSize(2);
   oled.setCursor(28, 9);
   oled.print("ZEROED");
@@ -670,6 +719,22 @@ void setup() {
   Wire1.setTimeOut(1000);
 
   imuOk = bno.begin(OPERATION_MODE_IMUPLUS);
+  if (imuOk) {
+    // The Gravity board carries a 32.768 kHz crystal. Without this the fusion
+    // runs off the internal RC oscillator, which Bosch does not consider good
+    // enough for the fusion modes — and a wandering timebase shows up as
+    // attitude drift over a ride rather than as an obvious failure.
+    bno.setExtCrystalUse(true);
+    // Restore calibration so a ride starts accurate instead of converging over
+    // its first few minutes. Offsets are per-chip, so they live in flash next
+    // to the mount reference.
+    adafruit_bno055_offsets_t off;
+    if (prefs.getBytes("bnooff", &off, sizeof(off)) == sizeof(off)) {
+      bno.setSensorOffsets(off);
+      Serial.println("IMU calibration offsets restored from flash");
+    }
+    bno.getCalibration(&calSys, &calGyro, &calAcc, &calMag);
+  }
   bmpOk = bmp.begin(0x76);
   if (bmpOk)
     bmp.setSampling(Adafruit_BMP280::MODE_NORMAL, Adafruit_BMP280::SAMPLING_X2,
@@ -786,21 +851,11 @@ void loop() {
   b2Prev = b2Down;
   if (b2Down && !zeroFired && now - b2FallAt >= ZERO_HOLD_MS) {
     zeroFired = true;
-    qRef = tiltOnly(lastQuat);          // this orientation's TILT is the new zero
-    saveQRef();
-    zeroSplashUntil = now + 1500;
-    tOled = 0;
-    Serial.println("[zero] mount reference captured & saved");
+    captureZero(now, "button");
   }
   if (bleZeroReq) {                     // 0x02 from the app — same capture as the hold
     bleZeroReq = false;
-    if (imuOk) {
-      qRef = tiltOnly(lastQuat);
-      saveQRef();
-      zeroSplashUntil = now + 1500;
-      tOled = 0;
-      Serial.println("[zero] mount reference captured & saved (app)");
-    }
+    if (imuOk) captureZero(now, "app");
   }
   if (bleRideMsg) {                     // 0x04: ride state, elapsed is app-authoritative
     bleRideMsg = false;
@@ -814,8 +869,15 @@ void loop() {
   // 100 Hz IMU
   if (imuOk && now - tImu >= 10) {
     tImu = now;
-    lastQuat = bno.getQuat();
-    lastLin = bno.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
+    // A glitched I2C read, or the chip briefly back in CONFIG mode, returns
+    // something that isn't a rotation. Holding the previous sample costs one
+    // 10 ms tick; letting it through corrupts the attitude outright.
+    imu::Quaternion q = bno.getQuat();
+    float n2 = q.w() * q.w() + q.x() * q.x() + q.y() * q.y() + q.z() * q.z();
+    if (n2 > 0.9f && n2 < 1.1f) lastQuat = q;
+    else                        quatRejects++;
+    lastLin  = bno.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
+    lastGyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
     float g = lastLin.magnitude() / 9.80665f;
     if (g > maxG_g) maxG_g = g;
   }
@@ -824,7 +886,9 @@ void loop() {
   if (now - tTele >= 200) {
     tTele = now;
     TelemetryPacket p = {};
-    p.ver = 0x02;                       // 0x01 was the 50-byte, pre-CAN packet
+    // 0x01 was the 50-byte pre-CAN packet; 0x02 added CAN but carried no gyro
+    // or calibration.
+    p.ver = 0x03;
     p.flags = (fixValid() ? 1 : 0) | (gps.time.isValid() ? 2 : 0);
     p.gpsTimeMs = gps.time.isValid()
         ? (uint32_t)gps.time.hour() * 3600000UL + (uint32_t)gps.time.minute() * 60000UL +
@@ -849,6 +913,10 @@ void loop() {
     p.linz_mg = (int16_t)(lastLin.z() / 9.80665f * 1000);
     p.maxG_mg = (int16_t)(maxG_g * 1000);
     p.marker = markerCount;
+    p.gyrx_d16 = (int16_t)(lastGyro.x() * 16);
+    p.gyry_d16 = (int16_t)(lastGyro.y() * 16);
+    p.gyrz_d16 = (int16_t)(lastGyro.z() * 16);
+    p.calib = (uint8_t)((calSys << 6) | (calGyro << 4) | (calAcc << 2) | calMag);
     maxG_g = 0;
 
     // Bike CAN. The whole block stays zero unless a frame arrived recently, so
@@ -889,6 +957,19 @@ void loop() {
       lastTempC = bmp.readTemperature();
       lastBaroAlt = bmp.readAltitude(1013.25f);
     }
+    if (imuOk) {
+      bno.getCalibration(&calSys, &calGyro, &calAcc, &calMag);
+      // Persist once per boot, the first time the chip says it is there.
+      // isFullyCalibrated() knows IMUPLUS wants accel and gyro but not mag.
+      if (!calSaved && bno.isFullyCalibrated()) {
+        adafruit_bno055_offsets_t off;
+        if (bno.getSensorOffsets(off)) {
+          prefs.putBytes("bnooff", &off, sizeof(off));
+          calSaved = true;
+          Serial.println("[cal] calibration reached 3/3 — offsets saved to flash");
+        }
+      }
+    }
     StatusPacket s = {};
     s.ver = 0x01;
     s.fix = fixValid() ? 1 : 0;
@@ -909,9 +990,15 @@ void loop() {
     // means the line is stuck) · lps: main-loop iterations since last line
     // (drops from tens of thousands to single digits when something blocks)
     bool canLive = canOk && canS.lastRxMs && now - canS.lastRxMs < CAN_STALE_MS;
-    Serial.printf("[dbg] fix=%d sats=%d view=%d conn=%d R=%+.1f P=%+.1f qW=%.3f baro=%.1fm mark=%d btn=%d%d lps=%lu stall=%lu can=%s/%lu %u%% %.1fV\n",
+    // cal: sys/gyro/accel — accel is the one that matters in IMUPLUS, and the
+    // one that gates the zero. gz is raw yaw rate: on a straight road it should
+    // sit near 0, and a steady non-zero reading is gyro bias, which is what
+    // makes attitude wander. qrej counts non-unit quaternions dropped since
+    // boot; a climbing number means the I2C run to the BNO055 is marginal.
+    Serial.printf("[dbg] fix=%d sats=%d view=%d conn=%d R=%+.1f P=%+.1f gz=%+.1f cal=%d%d%d qrej=%lu baro=%.1fm mark=%d btn=%d%d lps=%lu stall=%lu can=%s/%lu %u%% %.1fV\n",
                   s.fix, s.sats, satsInView(), bleServer->getConnectedCount(),
-                  dbgR, dbgP, lastQuat.w(), lastBaroAlt, markerCount,
+                  dbgR, dbgP, lastGyro.z(), calSys, calGyro, calAcc,
+                  (unsigned long)quatRejects, lastBaroAlt, markerCount,
                   digitalRead(PIN_BUTTON), digitalRead(PIN_BUTTON2), loopsPerSec, maxLoopGapMs,
                   canLive ? "live" : (canOk ? "idle" : "off"), (unsigned long)canS.frames,
                   canLive ? canS.f401[0] : 0,
