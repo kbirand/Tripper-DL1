@@ -6,12 +6,12 @@
 // AND the position source; this firmware never claims a GPS fix.
 //
 //   100 Hz  BNO055 quaternion + linear accel (IMUPLUS), latch interval max-g
-//   5 Hz    BLE telemetry notify (77-byte packed sample, same layout as Full)
+//   5 Hz    BLE telemetry notify (78-byte packed sample, same layout as Full)
 //   1 Hz    BLE status notify, baro sample, serial debug line
 //   ~92/s   Talaria CAN frames, listen-only (SN65HVD230 on D8/D9)
 //
 // WIRE-COMPATIBLE WITH THE FULL BUILD ON PURPOSE. Identical service UUIDs,
-// identical 77-byte telemetry packet, identical 14-byte status packet. The app
+// identical 78-byte telemetry packet, identical 14-byte status packet. The app
 // needs no branch: the GPS block simply arrives zeroed with both flags bits
 // clear, which is the same "no fix" state the Full build reports indoors, and
 // the app already has to gate on those bits. Capability bits in the status
@@ -99,8 +99,13 @@ struct __attribute__((packed)) TelemetryPacket {
   // the recording. Keep in step with tripper_puck.ino.
   int16_t  gyrx_d16, gyry_d16, gyrz_d16;   // sensor-frame gyro, deg/s * 16
   uint8_t  calib;        // bits 7:6 sys · 5:4 gyro · 3:2 accel · 1:0 mag
+  // Increments on every mount zero the puck actually ACCEPTS, so the app can
+  // tell "captured" from "the write never landed" or "refused". Wraps at 255
+  // and restarts at 0 on reboot; the app watches for *any* change against a
+  // baseline it takes when it sends, so neither matters.
+  uint8_t  zeroCount;
 };
-static_assert(sizeof(TelemetryPacket) == 77, "telemetry packet size drifted");
+static_assert(sizeof(TelemetryPacket) == 78, "telemetry packet size drifted");
 
 struct __attribute__((packed)) StatusPacket {
   uint8_t  ver;          // 0x01
@@ -156,6 +161,7 @@ bool     calSaved = false;              // offsets already written to flash
 // screen leaves the rider no way to zero at all.
 bool     calRestored = false;
 uint32_t quatRejects = 0;               // getQuat() results that weren't unit
+uint8_t  zeroCount = 0;                 // successful mount zeros since boot
 float lastPressPa = 0, lastTempC = 0, lastBaroAlt = 0;
 uint32_t tImu = 0, tTele = 0, tStatus = 0;
 uint32_t loopsPerSec = 0;
@@ -401,6 +407,7 @@ void loop() {
       } else {
         qRef = tiltOnly(lastQuat);      // this orientation's TILT is the new zero
         saveQRef();
+        zeroCount++;                    // the app's proof it landed
         Serial.println("[zero] mount reference captured & saved (app)");
       }
     }
@@ -449,6 +456,7 @@ void loop() {
     p.gyry_d16 = (int16_t)(lastGyro.y() * 16);
     p.gyrz_d16 = (int16_t)(lastGyro.z() * 16);
     p.calib = (uint8_t)((calSys << 6) | (calGyro << 4) | (calAcc << 2) | calMag);
+    p.zeroCount = zeroCount;
     maxG_g = 0;
 
     // Bike CAN. The whole block stays zero unless a frame arrived recently, so

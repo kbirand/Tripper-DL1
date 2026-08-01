@@ -422,7 +422,7 @@ Device name `Tripper-DL1`. One service, three characteristics:
 | `…0003` | status | notify + read, 1 Hz, 14 B |
 | `…0004` | control | write / write-no-response |
 
-### Telemetry packet (77 bytes, little-endian, packed)
+### Telemetry packet (78 bytes, little-endian, packed)
 
 | Offset | Type | Field | Notes |
 |---|---|---|---|
@@ -456,6 +456,7 @@ Device name `Tripper-DL1`. One service, three characteristics:
 | 69 | u8 | cellLo_idx | its index, 1–16 |
 | 70 | i16×3 | gyr x y z | raw gyro, deg/s × 16 (sensor frame) |
 | 76 | u8 | calib | bits 7:6 sys · 5:4 gyro · 3:2 accel · 1:0 mag, each 0–3 |
+| 77 | u8 | zeroCount | mount zeros the puck has **accepted** since boot |
 
 Bytes 50–69 are the bike's CAN bus, read listen-only from a SN65HVD230 on
 D8/D9 (see [Bike CAN bus](#bike-can-bus-talaria)). **The whole block is zeroed
@@ -468,12 +469,19 @@ Note `speed_cmps` at offset 26 is GPS ground speed in cm/s; `canSpeed_dkph`
 at 51 is the bike's own wheel speed in 0.1 km/h. They are independent
 measurements and will disagree — wheelspin, GPS lag, tyre circumference.
 
-Bytes 70–76 are IMU health, appended *after* the CAN block so every `0x02`
+Bytes 70–77 are IMU health, appended *after* the CAN block so every `0x02`
 offset stays byte-identical and an older app keeps parsing. They exist because
 raw gyro and calibration used to stay on the puck — which is why a lean fault
 took a GPS cross-check to diagnose rather than a look at the recording. `mag` is
 always 0: IMUPLUS never turns the magnetometer on. See
 [IMU calibration](#imu-calibration) for what the numbers mean.
+
+`zeroCount` exists because the mount zero is a fire-and-forget control write
+that the puck is allowed to refuse — so "the rider tapped the button" and "the
+puck re-referenced itself" are different facts, and on a Light build there is no
+screen to tell them apart. It increments only on a zero the puck **accepted**.
+Watch for a *change* against the value you held when you sent `0x02`, never for
+a particular number: it wraps at 255 and restarts at 0 on reboot.
 
 ### Status packet (14 bytes)
 
