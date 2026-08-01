@@ -427,7 +427,7 @@ Device name `Tripper-DL1`. One service, three characteristics:
 | Offset | Type | Field | Notes |
 |---|---|---|---|
 | 0 | u8 | ver | `0x03` — `0x02` was the 70-byte packet with no IMU health, `0x01` the 50-byte pre-CAN one |
-| 1 | u8 | flags | bit0 fix valid · bit1 time valid |
+| 1 | u8 | flags | bit0 fix valid · bit1 time valid · bit2 IMU calibration usable |
 | 2 | u32 | gpsTimeMs | UTC ms-of-day, `0xFFFFFFFF` if invalid |
 | 6 | i32 | lat_e7 | degrees × 1e7 |
 | 10 | i32 | lon_e7 | degrees × 1e7 |
@@ -524,7 +524,7 @@ So the firmware now:
   crystal; without this the fusion runs on the internal RC oscillator, which
   Bosch does not consider adequate for the fusion modes
 - reads `getCalibration()` at 1 Hz and puts it in the telemetry packet
-- **refuses a mount zero while accel calibration is under 3/3** — the OLED shows
+- **refuses a mount zero while the IMU is uncalibrated** — the OLED shows
   `ACC n/3` instead of `ZEROED`, and the app disables its zero button and says
   why (a Light puck has no screen, so the app is the only place it can)
 - saves the offsets to flash the first time calibration reaches 3/3 and restores
@@ -537,6 +537,15 @@ a few seconds. Accelerometer and gyro both settle without any waving about —
 that dance is for the magnetometer, which this mode never uses. Watch `cal=` in
 the serial debug line, or the app's *IMU calibration* row. It is a once-per-chip
 chore, not once-per-ride, because the offsets persist.
+
+> **`cal=` reads 0 for accel after every reboot, even on a calibrated chip.**
+> The BNO055's `CALIB_STAT` reports the fusion's *live* confidence, not whether
+> offsets are loaded — restoring them does not restore the status byte. So
+> nothing gates on `cal` directly: the firmware tracks whether it restored
+> offsets from flash, and publishes the verdict as **flags bit2**. That is what
+> the app's zero button follows. Gating on `cal` alone would refuse a zero after
+> every power-up, which on a Light puck (no buttons, no screen) would leave no
+> way to zero at all.
 
 **Reading the debug line** — `cal=321` is sys 3, gyro 2, accel 1. Only the last
 two matter here; `sys` stays low in IMUPLUS and is not a fault. `gz=` is the raw

@@ -61,7 +61,8 @@ static const char *CTRL_UUID = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70004";
 // Byte-for-byte identical to tripper_puck.ino. Do not reorder either copy.
 struct __attribute__((packed)) TelemetryPacket {
   uint8_t  ver;          // 0x03
-  uint8_t  flags;        // bit0 fix valid, bit1 time valid — both 0 in this build
+  uint8_t  flags;        // bit0 fix valid, bit1 time valid — both 0 in this
+                         // build · bit2 IMU calibration usable
   uint32_t gpsTimeMs;    // always 0xFFFFFFFF here
   int32_t  lat_e7;       // always 0 here
   int32_t  lon_e7;       // always 0 here
@@ -147,6 +148,13 @@ imu::Vector<3> lastGyro;                // sensor frame, deg/s
 // decides whether a mount zero means anything, and calMag stays 0 forever.
 uint8_t calSys = 0, calGyro = 0, calAcc = 0, calMag = 0;
 bool     calSaved = false;              // offsets already written to flash
+// True once per-chip offsets have been loaded from flash. Needed because the
+// BNO055's CALIB_STAT reports the fusion's *live* confidence, not whether
+// offsets are applied — it reads 0 after every reset even on a chip whose
+// calibration was saved. Gating the mount zero on calAcc alone would therefore
+// refuse it after every power-up, which on a build with no buttons and no
+// screen leaves the rider no way to zero at all.
+bool     calRestored = false;
 uint32_t quatRejects = 0;               // getQuat() results that weren't unit
 float lastPressPa = 0, lastTempC = 0, lastBaroAlt = 0;
 uint32_t tImu = 0, tTele = 0, tStatus = 0;
@@ -315,6 +323,7 @@ void setup() {
     adafruit_bno055_offsets_t off;
     if (prefs.getBytes("bnooff", &off, sizeof(off)) == sizeof(off)) {
       bno.setSensorOffsets(off);
+      calRestored = true;
       Serial.println("IMU calibration offsets restored from flash");
     }
     bno.getCalibration(&calSys, &calGyro, &calAcc, &calMag);
@@ -386,7 +395,7 @@ void loop() {
       // buttons, so the app is the only place the rider can be told — it
       // checks the same calibration byte before it ever sends 0x02, and this
       // is the backstop behind that check.
-      if (calAcc < 3) {
+      if (calAcc < 3 && !calRestored) {
         Serial.printf("[zero] refused: accel calibration %d/3 — leave the bike "
                       "still and level for a few seconds\n", calAcc);
       } else {
@@ -421,7 +430,7 @@ void loop() {
     // No GPS in this build. flags stays 0 and the position block stays zeroed,
     // which is the same state the Full build reports before it gets a fix — so
     // the app's existing gating covers this without a special case.
-    p.flags = 0;
+    p.flags = (calAcc >= 3 || calRestored) ? 4 : 0;
     p.gpsTimeMs = 0xFFFFFFFF;
     p.hdop_c = 9999;
     p.baroAlt_cm = (int32_t)(lastBaroAlt * 100);
@@ -483,11 +492,19 @@ void loop() {
       // Persist once per boot, the first time the chip says it is there.
       // isFullyCalibrated() knows IMUPLUS wants accel and gyro but not mag.
       if (!calSaved && bno.isFullyCalibrated()) {
-        adafruit_bno055_offsets_t off;
+        adafruit_bno055_offsets_t off, prev;
         if (bno.getSensorOffsets(off)) {
-          prefs.putBytes("bnooff", &off, sizeof(off));
-          calSaved = true;
-          Serial.println("[cal] calibration reached 3/3 — offsets saved to flash");
+          // Only write when they actually changed. Offsets are restored at
+          // boot, so calibration reaches 3/3 within a second of every start —
+          // writing unconditionally would burn an NVS cycle and stall the loop
+          // ~115 ms on each power-up, which mid-ride costs telemetry packets.
+          bool same = prefs.getBytes("bnooff", &prev, sizeof(prev)) == sizeof(prev)
+                      && memcmp(&prev, &off, sizeof(off)) == 0;
+          if (!same) {
+            prefs.putBytes("bnooff", &off, sizeof(off));
+            Serial.println("[cal] calibration reached 3/3 — offsets saved to flash");
+          }
+          calSaved = true;              // checked once per boot either way
         }
       }
     }

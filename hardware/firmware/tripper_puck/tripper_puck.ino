@@ -92,7 +92,8 @@ static const char *CTRL_UUID = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70004";
 // ---------- packets (little-endian, packed) ----------
 struct __attribute__((packed)) TelemetryPacket {
   uint8_t  ver;          // 0x03
-  uint8_t  flags;        // bit0 fix valid, bit1 time valid
+  uint8_t  flags;        // bit0 fix valid · bit1 time valid · bit2 IMU
+                         // calibration usable (live 3/3 or restored from flash)
   uint32_t gpsTimeMs;    // UTC ms of day, 0xFFFFFFFF if invalid
   int32_t  lat_e7;       // deg * 1e7
   int32_t  lon_e7;
@@ -181,6 +182,13 @@ imu::Vector<3> lastGyro;                // sensor frame, deg/s
 // decides whether a mount zero means anything, and calMag stays 0 forever.
 uint8_t calSys = 0, calGyro = 0, calAcc = 0, calMag = 0;
 bool     calSaved = false;              // offsets already written to flash
+// True once per-chip offsets have been loaded from flash. Needed because the
+// BNO055's CALIB_STAT reports the fusion's *live* confidence, not whether
+// offsets are applied — it reads 0 after every reset even on a chip whose
+// calibration was saved. Gating the mount zero on calAcc alone would therefore
+// refuse it after every power-up, which on a build with no buttons and no
+// screen leaves the rider no way to zero at all.
+bool     calRestored = false;
 uint32_t quatRejects = 0;               // getQuat() results that weren't unit
 float lastPressPa = 0, lastTempC = 0, lastBaroAlt = 0;
 uint32_t identifyUntil = 0, splashUntil = 0;
@@ -298,7 +306,7 @@ imu::Quaternion qRel() {
 void captureZero(uint32_t now, const char *source) {
   zeroSplashUntil = now + 1500;
   tOled = 0;
-  if (calAcc < 3) {
+  if (calAcc < 3 && !calRestored) {
     zeroRefused = true;
     Serial.printf("[zero] refused (%s): accel calibration %d/3 — leave the bike "
                   "still and level for a few seconds\n", source, calAcc);
@@ -731,6 +739,7 @@ void setup() {
     adafruit_bno055_offsets_t off;
     if (prefs.getBytes("bnooff", &off, sizeof(off)) == sizeof(off)) {
       bno.setSensorOffsets(off);
+      calRestored = true;
       Serial.println("IMU calibration offsets restored from flash");
     }
     bno.getCalibration(&calSys, &calGyro, &calAcc, &calMag);
@@ -889,7 +898,8 @@ void loop() {
     // 0x01 was the 50-byte pre-CAN packet; 0x02 added CAN but carried no gyro
     // or calibration.
     p.ver = 0x03;
-    p.flags = (fixValid() ? 1 : 0) | (gps.time.isValid() ? 2 : 0);
+    p.flags = (fixValid() ? 1 : 0) | (gps.time.isValid() ? 2 : 0)
+              | ((calAcc >= 3 || calRestored) ? 4 : 0);
     p.gpsTimeMs = gps.time.isValid()
         ? (uint32_t)gps.time.hour() * 3600000UL + (uint32_t)gps.time.minute() * 60000UL +
           (uint32_t)gps.time.second() * 1000UL + (uint32_t)gps.time.centisecond() * 10UL
@@ -962,11 +972,19 @@ void loop() {
       // Persist once per boot, the first time the chip says it is there.
       // isFullyCalibrated() knows IMUPLUS wants accel and gyro but not mag.
       if (!calSaved && bno.isFullyCalibrated()) {
-        adafruit_bno055_offsets_t off;
+        adafruit_bno055_offsets_t off, prev;
         if (bno.getSensorOffsets(off)) {
-          prefs.putBytes("bnooff", &off, sizeof(off));
-          calSaved = true;
-          Serial.println("[cal] calibration reached 3/3 — offsets saved to flash");
+          // Only write when they actually changed. Offsets are restored at
+          // boot, so calibration reaches 3/3 within a second of every start —
+          // writing unconditionally would burn an NVS cycle and stall the loop
+          // ~115 ms on each power-up, which mid-ride costs telemetry packets.
+          bool same = prefs.getBytes("bnooff", &prev, sizeof(prev)) == sizeof(prev)
+                      && memcmp(&prev, &off, sizeof(off)) == 0;
+          if (!same) {
+            prefs.putBytes("bnooff", &off, sizeof(off));
+            Serial.println("[cal] calibration reached 3/3 — offsets saved to flash");
+          }
+          calSaved = true;              // checked once per boot either way
         }
       }
     }
