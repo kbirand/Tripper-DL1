@@ -50,6 +50,17 @@
 #define PIN_SCL      D5
 #define PIN_BUTTON   D1
 #define PIN_BUTTON2  D2        // screen hold / attitude zero
+// The OLED lives in the handlebar enclosure, a ~1 m cable away from the ESP32,
+// so it gets its own I2C bus. Sharing one bus would drag the BNO055 — whose
+// clock-stretching already forces the whole bus to 100 kHz — onto that long,
+// capacitive, noisy run. Split, the worst a bad cable can do is glitch the
+// screen; the sensor bus stays 15 cm long inside the rear enclosure.
+#define PIN_OLED_SDA D3
+#define PIN_OLED_SCL D10
+#define OLED_BUS_HZ    100000  // idle speed on the long handlebar run
+// Frames burst faster than the idle speed since nothing else shares Wire1.
+// Drop this to OLED_BUS_HZ if a long or unshielded cable tears the display.
+#define OLED_BURST_HZ  400000
 #define CAN_TX_GPIO  GPIO_NUM_7   // D8 -> SN65HVD230 CTX
 #define CAN_RX_GPIO  GPIO_NUM_8   // D9 <- SN65HVD230 CRX
 #define CAN_STALE_MS 2000UL       // no frame for this long = bus considered dead
@@ -127,7 +138,7 @@ static_assert(sizeof(StatusPacket) == 14, "status packet size drifted");
 // ---------- devices ----------
 Adafruit_BNO055   bno = Adafruit_BNO055(55, 0x28, &Wire);
 Adafruit_BMP280   bmp(&Wire);
-Adafruit_SSD1306  oled(128, 32, &Wire, -1);
+Adafruit_SSD1306  oled(128, 32, &Wire1, -1);   // handlebar bus, see PIN_OLED_SDA
 TinyGPSPlus       gps;
 TinyGPSCustom     gsvGP(gps, "GPGSV", 3), gsvGL(gps, "GLGSV", 3), gsvGB(gps, "GBGSV", 3);
 
@@ -575,9 +586,9 @@ void refreshOled(uint32_t now) {
   }
   // recording inverts the whole display; identify blinks relative to that
   oled.invertDisplay(rideActive != (now < identifyUntil));
-  Wire.setClock(400000);                // burst the frame out fast (OLED-only transfer)
+  Wire1.setClock(OLED_BURST_HZ);        // burst the frame out fast
   oled.display();
-  Wire.setClock(100000);                // back to the BNO055-safe speed
+  Wire1.setClock(OLED_BUS_HZ);          // back to the long-cable-safe speed
 }
 
 // ---------- setup ----------
@@ -585,9 +596,9 @@ void refreshOled(uint32_t now) {
 // it never checks for an ACK — so an unplugged display still reported "ok" and
 // then ate a NACKing 512-byte transfer on every refresh. Probe the bus first
 // so oledOk means what it says.
-bool i2cPresent(uint8_t addr) {
-  Wire.beginTransmission(addr);
-  return Wire.endTransmission() == 0;
+bool i2cPresent(TwoWire &bus, uint8_t addr) {
+  bus.beginTransmission(addr);
+  return bus.endTransmission() == 0;
 }
 
 // Listen-only: the controller never transmits and never even ACKs, so the
@@ -651,9 +662,12 @@ void setup() {
   // strip rather than discard: an already-zeroed puck needs no re-zero.
   qRef = tiltOnly(qRef);
 
-  Wire.begin(PIN_SDA, PIN_SCL);
+  Wire.begin(PIN_SDA, PIN_SCL);         // rear enclosure: BNO055 + BMP280
   Wire.setClock(100000);
   Wire.setTimeOut(1000);
+  Wire1.begin(PIN_OLED_SDA, PIN_OLED_SCL);   // handlebar enclosure: OLED alone
+  Wire1.setClock(OLED_BUS_HZ);
+  Wire1.setTimeOut(1000);
 
   imuOk = bno.begin(OPERATION_MODE_IMUPLUS);
   bmpOk = bmp.begin(0x76);
@@ -661,7 +675,7 @@ void setup() {
     bmp.setSampling(Adafruit_BMP280::MODE_NORMAL, Adafruit_BMP280::SAMPLING_X2,
                     Adafruit_BMP280::SAMPLING_X16, Adafruit_BMP280::FILTER_X4,
                     Adafruit_BMP280::STANDBY_MS_63);
-  uint8_t oledAddr = i2cPresent(0x3C) ? 0x3C : i2cPresent(0x3D) ? 0x3D : 0;
+  uint8_t oledAddr = i2cPresent(Wire1, 0x3C) ? 0x3C : i2cPresent(Wire1, 0x3D) ? 0x3D : 0;
   oledOk = oledAddr && oled.begin(SSD1306_SWITCHCAPVCC, oledAddr);
   Serial.printf("IMU %s | BMP280 %s | OLED %s\n",
                 imuOk ? "ok" : "FAIL", bmpOk ? "ok" : "FAIL",

@@ -17,6 +17,7 @@
 //
 // Signal map and its provenance: tools/talaria.dbc
 // Wiring: module 3V3->3V3, GND->GND, CTX->D8, CRX->D9, CANH/CANL to the bike.
+// OLED on D3/D10 (the handlebar I2C bus), same as the production firmware.
 // The module's onboard 120R terminator MUST be removed — the bike's bus is
 // already terminated at both ends (60 R) and a third resistor makes it 40 R.
 
@@ -66,9 +67,11 @@ void setup() {
   Serial.begin(115200);
   startMs = millis();
 
-  // OLED-only bus here, so 400 kHz is safe: the BNO055 whose clock-stretching
-  // forces 100 kHz in the production firmware is never addressed by this sketch.
-  Wire.begin(D4, D5);
+  // D3/D10 is the handlebar OLED bus, matching the production firmware's Wire1.
+  // Only the display hangs off it, so 400 kHz is safe here — the BNO055 whose
+  // clock-stretching forces 100 kHz sits on the rear D4/D5 bus this sketch
+  // never touches. Drop to 100 kHz if a long handlebar cable tears the frames.
+  Wire.begin(D3, D10);
   Wire.setClock(400000);
   haveOled = oled.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   if (haveOled) {
