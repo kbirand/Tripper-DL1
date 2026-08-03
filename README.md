@@ -422,11 +422,11 @@ Device name `Tripper-DL1`. One service, three characteristics:
 | `…0003` | status | notify + read, 1 Hz, 14 B |
 | `…0004` | control | write / write-no-response |
 
-### Telemetry packet (78 bytes, little-endian, packed)
+### Telemetry packet (86 bytes, little-endian, packed)
 
 | Offset | Type | Field | Notes |
 |---|---|---|---|
-| 0 | u8 | ver | `0x03` — `0x02` was the 70-byte packet with no IMU health, `0x01` the 50-byte pre-CAN one |
+| 0 | u8 | ver | `0x04` — `0x03` was the 78-byte packet with no raw accelerometer, `0x02` the 70-byte one with no IMU health, `0x01` the 50-byte pre-CAN one |
 | 1 | u8 | flags | bit0 fix valid · bit1 time valid · bit2 IMU calibration usable |
 | 2 | u32 | gpsTimeMs | UTC ms-of-day, `0xFFFFFFFF` if invalid |
 | 6 | i32 | lat_e7 | degrees × 1e7 |
@@ -457,6 +457,8 @@ Device name `Tripper-DL1`. One service, three characteristics:
 | 70 | i16×3 | gyr x y z | raw gyro, deg/s × 16 (sensor frame) |
 | 76 | u8 | calib | bits 7:6 sys · 5:4 gyro · 3:2 accel · 1:0 mag, each 0–3 |
 | 77 | u8 | zeroCount | mount zeros the puck has **accepted** since boot |
+| 78 | i16×3 | acc x y z | **raw** accelerometer, mg (sensor frame) — gravity included, pre-fusion |
+| 84 | u16 | quatRejects | non-unit `getQuat()` reads dropped since boot, saturating |
 
 Bytes 50–69 are the bike's CAN bus, read listen-only from a SN65HVD230 on
 D8/D9 (see [Bike CAN bus](#bike-can-bus-talaria)). **The whole block is zeroed
@@ -482,6 +484,24 @@ puck re-referenced itself" are different facts, and on a Light build there is no
 screen to tell them apart. It increments only on a zero the puck **accepted**.
 Watch for a *change* against the value you held when you sent `0x02`, never for
 a particular number: it wraps at 255 and restarts at 0 on reboot.
+
+Bytes 78–85 are the **raw accelerometer** and the quaternion-reject count, and
+they exist because everything above them that bears on attitude — the
+quaternion, the linear accel, even the calibration byte — is a *product* of the
+BNO055's fusion. When the fusion itself is the suspect, those fields agree with
+each other by construction, whatever they say. A ride that read −10° of lean
+down a dead-straight road ruled out the mount, the axes, the zero, gyro drift,
+the bike's own acceleration and vibration, then ran out of evidence, because
+every remaining witness was the accused.
+
+`acc` is the pre-fusion measurement: gravity plus motion, straight off the
+sensor, in the sensor frame and deliberately not rotated by anything.
+**`acc − lin` is the fusion's own gravity vector** — compare its direction
+against the quaternion, and against the low-passed direction of `acc` itself,
+and "is the chip fed bad data, or mishandling good data" becomes answerable
+from a recording. `quatRejects` should stay flat; a count that climbs mid-ride
+means the attitude is being *held* across glitched I2C reads rather than
+tracking the bike.
 
 ### Status packet (14 bytes)
 

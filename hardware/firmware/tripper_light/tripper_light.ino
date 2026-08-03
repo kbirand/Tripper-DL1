@@ -60,7 +60,7 @@ static const char *CTRL_UUID = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70004";
 // ---------- packets (little-endian, packed) ----------
 // Byte-for-byte identical to tripper_puck.ino. Do not reorder either copy.
 struct __attribute__((packed)) TelemetryPacket {
-  uint8_t  ver;          // 0x03
+  uint8_t  ver;          // 0x04
   uint8_t  flags;        // bit0 fix valid, bit1 time valid — both 0 in this
                          // build · bit2 IMU calibration usable
   uint32_t gpsTimeMs;    // always 0xFFFFFFFF here
@@ -104,8 +104,25 @@ struct __attribute__((packed)) TelemetryPacket {
   // and restarts at 0 on reboot; the app watches for *any* change against a
   // baseline it takes when it sends, so neither matters.
   uint8_t  zeroCount;
+  // ---- raw accelerometer (ver 0x04). Everything above that bears on attitude
+  // is a *product* of the BNO055's fusion — the quaternion, the linear accel,
+  // even the calibration byte — so when the fusion itself is the suspect, the
+  // packet holds nothing independent to convict it with. A ride that read -10°
+  // of lean down a dead-straight road ruled out the mount, the axes, the zero,
+  // gyro drift, the bike's own acceleration and vibration, and then ran out of
+  // evidence, because every remaining witness was the accused.
+  //
+  // This is the pre-fusion measurement: gravity plus motion, straight off the
+  // accelerometer. Subtract lin*_mg and what remains is the fusion's own idea
+  // of down — which is what the whole attitude rests on. Keep in step with
+  // tripper_puck.ino.
+  int16_t  accx_mg, accy_mg, accz_mg;   // sensor-frame accelerometer, mg
+  // Non-unit getQuat() results dropped since boot, saturating. Printed to USB
+  // since the first build and never recorded; a count that climbs mid-ride
+  // means the attitude is being *held* across glitched I2C reads, not tracking.
+  uint16_t quatRejects;
 };
-static_assert(sizeof(TelemetryPacket) == 78, "telemetry packet size drifted");
+static_assert(sizeof(TelemetryPacket) == 86, "telemetry packet size drifted");
 
 struct __attribute__((packed)) StatusPacket {
   uint8_t  ver;          // 0x01
@@ -148,6 +165,7 @@ float maxG_g = 0;                       // latched between telemetry packets
 imu::Quaternion lastQuat;
 imu::Vector<3> lastLin;
 imu::Vector<3> lastGyro;                // sensor frame, deg/s
+imu::Vector<3> lastAcc;                 // sensor frame, m/s² — RAW, pre-fusion
 // BNO055 calibration, refreshed at 1 Hz. IMUPLUS has no magnetometer, so the
 // accelerometer is the only thing that knows where down is: calAcc is what
 // decides whether a mount zero means anything, and calMag stays 0 forever.
@@ -425,6 +443,10 @@ void loop() {
     else                        quatRejects++;
     lastLin  = bno.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
     lastGyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+    // Sampled in the same 10 ms tick as the quaternion and the linear accel, so
+    // the three are one consistent snapshot — the comparison they exist for is
+    // meaningless if they come from different instants.
+    lastAcc  = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
     float g = lastLin.magnitude() / 9.80665f;
     if (g > maxG_g) maxG_g = g;
   }
@@ -433,7 +455,7 @@ void loop() {
   if (now - tTele >= 200) {
     tTele = now;
     TelemetryPacket p = {};
-    p.ver = 0x03;                       // 0x02 carried no gyro or calibration
+    p.ver = 0x04;                       // 0x03 carried nothing pre-fusion
     // No GPS in this build. flags stays 0 and the position block stays zeroed,
     // which is the same state the Full build reports before it gets a fix — so
     // the app's existing gating covers this without a special case.
@@ -457,6 +479,14 @@ void loop() {
     p.gyrz_d16 = (int16_t)(lastGyro.z() * 16);
     p.calib = (uint8_t)((calSys << 6) | (calGyro << 4) | (calAcc << 2) | calMag);
     p.zeroCount = zeroCount;
+    // Raw accel in mg. ±16 g would overflow an int16 in mg, but the BNO055's
+    // accelerometer runs at ±4 g in fusion mode and clips there itself, so the
+    // range can't be reached. Clamped anyway: a wrapped sign on the one channel
+    // that exists to be trusted is worse than a saturated one.
+    p.accx_mg = (int16_t)constrain(lastAcc.x() / 9.80665f * 1000, -32000, 32000);
+    p.accy_mg = (int16_t)constrain(lastAcc.y() / 9.80665f * 1000, -32000, 32000);
+    p.accz_mg = (int16_t)constrain(lastAcc.z() / 9.80665f * 1000, -32000, 32000);
+    p.quatRejects = (uint16_t)min(quatRejects, 65535UL);
     maxG_g = 0;
 
     // Bike CAN. The whole block stays zero unless a frame arrived recently, so
