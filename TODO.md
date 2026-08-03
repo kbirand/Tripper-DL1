@@ -1,5 +1,19 @@
 # Open issues
 
+## Lean and slope are still wrong, and the cause is not yet known
+
+**Status:** open, investigation logged in
+[`docs/lean-investigation.md`](docs/lean-investigation.md). Read that before
+touching attitude code.
+
+Five hypotheses have been tested and eliminated — mount/axes/zero, gyro drift,
+the frame algebra, the bike's own acceleration, vibration level — and two
+explanations were offered and withdrawn. The gyro, the mount and the barometer
+are all confirmed healthy; the absolute angle out of the BNO055's fusion is
+not. Firmware v0x04 puts the raw accelerometer on the wire so the next ride can
+tell "the chip is fed bad data" from "the chip mishandles good data", which
+this one could not. The file lists exactly what to check when that ride lands.
+
 ## Connector topology for the handlebar run is out of date in the docs
 
 **Status:** decided in discussion, not yet reflected in the documentation.
