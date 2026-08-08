@@ -9,6 +9,8 @@
 //   5 Hz    GPS epochs (module pre-configured; re-configured at every boot)
 //   5 Hz    BLE telemetry notify (86-byte packed sample) + BMP280 baro sample
 //   1 Hz    BLE status notify, baro temperature, serial debug line
+//   10 Hz   BLE raw notify — the 100 Hz IMU samples themselves, un-averaged,
+//           batched ten at a time with the puck's own timestamp (see RawBatch)
 //   2 Hz    OLED refresh — clock / live data / bike CAN (/ trip time)
 //   ~92/s   Talaria CAN frames, listen-only (SN65HVD230 on D8/D9)
 //
@@ -27,6 +29,8 @@
 // Control writes: 0x01 = marker ack flash · 0x02 = zero the mount (same as the
 // button 2 long-hold, and refused the same way) · 0x03 = identify (LED
 // rainbow + OLED invert, for picking the right device in a scanner app) ·
+// 0x06 + [on u8] = raw 100 Hz stream on/off (boots on; the phone decides
+// whether to keep the bytes).
 // 0x04 + [active u8][elapsed s u32 LE] = ride state — while active the OLED
 // runs inverted and a third screen (trip time) joins the cycle. The app
 // re-sends it on every reconnect, so a link flap or puck reboot mid-ride
@@ -46,6 +50,7 @@
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <WebServer.h>
+#include <Update.h>
 #include <esp_system.h>
 
 // ---------- OTA (flashing over WiFi) ----------
@@ -147,6 +152,9 @@ static const char *SVC_UUID  = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70001";
 static const char *TELE_UUID = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70002";
 static const char *STAT_UUID = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70003";
 static const char *CTRL_UUID = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70004";
+// Raw 100 Hz flight recorder. Additive: a phone that never subscribes sees the
+// puck behave exactly as before.
+static const char *RAW_UUID  = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70005";
 
 // ---------- packets (little-endian, packed) ----------
 struct __attribute__((packed)) TelemetryPacket {
@@ -242,6 +250,53 @@ struct __attribute__((packed)) StatusPacket {
 };
 static_assert(sizeof(StatusPacket) == 15, "status packet size drifted");
 
+// ---------- raw flight recorder ----------
+// The telemetry packet averages twenty 100 Hz samples into one number. That is
+// right for a live display and wrong for everything else: fork and shock
+// resonance sits at 2-5 Hz and wheel hop at 10-20 Hz, so at a 5 Hz output rate
+// they alias into the road-grade band and can never be separated again. A
+// boxcar mean is a poor anti-alias filter anyway — first sidelobe only 13 dB
+// down. This characteristic ships the samples themselves so the filter can be
+// designed offline, once, against real road data instead of guesswork.
+//
+// TIME IS THE PART THAT IS EASY TO GET WRONG. BLE delivers in bursts, so the
+// phone's receive time is not when the sample was taken; at 5 Hz nobody
+// noticed, at 100 Hz it would wreck every derivative computed downstream. Each
+// batch therefore carries the PUCK's own millisecond counter for its first
+// sample and the nominal period, and the true timeline is reconstructed from
+// those. The phone's clock anchors the start of the ride and nothing else.
+struct __attribute__((packed)) RawSample {
+  int16_t gx, gy, gz;    // deg/s * 100  (BNO055 resolves 1/16 deg/s)
+  int16_t ax, ay, az;    // milli-g      (BNO055 resolves ~1 mg)
+};
+static_assert(sizeof(RawSample) == 12, "raw sample size drifted");
+
+struct __attribute__((packed)) RawBatch {
+  uint8_t  ver;          // 0x01
+  uint8_t  count;        // RawSamples following this header
+  uint16_t period_us100; // nominal sample period, units of 100 us (100 = 10 ms)
+  uint32_t t0_ms;        // puck millis at the FIRST sample in this batch
+  // The chip's own fusion, UNZEROED and unprocessed. Convicted on 2026-08-08 of
+  // inventing tilt its own raw accelerometer contradicts, and kept here anyway:
+  // a verdict nobody can re-test is an opinion. Logging it costs 8 bytes.
+  int16_t  qw, qx, qy, qz;
+  int32_t  press_pa;     // raw pressure, NOT altitude — the conversion is lossy
+  int16_t  temp_x10;
+  uint8_t  calSys, calGyr, calAcc, calMag;
+  uint8_t  pad[2];
+};
+static_assert(sizeof(RawBatch) == 28, "raw batch header size drifted");
+
+// 10 samples per batch = 148 B on the wire at 10 batches/s. iOS negotiates a
+// 185 B ATT MTU (182 B of payload), so one batch is one notification with room
+// to spare, and 1.5 kB/s is a fraction of what the link carries.
+#define RAW_BATCH_N 10
+static RawSample rawBuf[RAW_BATCH_N];
+static uint8_t   rawN = 0;
+static uint32_t  rawT0 = 0;
+static bool      rawEnabled = true;   // opcode 0x06 turns it off; boots on
+static uint32_t  rawBatches = 0;
+
 // ---------- devices ----------
 Adafruit_BNO055   bno = Adafruit_BNO055(55, 0x28, &Wire);
 Adafruit_BMP280   bmp(&Wire);
@@ -249,7 +304,7 @@ Adafruit_SSD1306  oled(128, 32, &Wire1, -1);   // handlebar bus, see PIN_OLED_SD
 TinyGPSPlus       gps;
 TinyGPSCustom     gsvGP(gps, "GPGSV", 3), gsvGL(gps, "GLGSV", 3), gsvGB(gps, "GBGSV", 3);
 
-NimBLECharacteristic *chTele = nullptr, *chStat = nullptr;
+NimBLECharacteristic *chTele = nullptr, *chStat = nullptr, *chRaw = nullptr;
 NimBLEServer *bleServer = nullptr;
 
 bool imuOk = false, bmpOk = false, oledOk = false, canOk = false;
@@ -555,6 +610,16 @@ class CtrlCB : public NimBLECharacteristicCallbacks {
         break;
       case 0x05:                                                        // WiFi flashing mode
         if (v.size() >= 2) { bleOtaOnB = v.data()[1]; bleOtaMsg = true; }
+        break;
+      // 0x06 + [on u8]: raw 100 Hz stream. Boots ON — every ride should be a
+      // regression test, and the phone decides whether to keep the bytes. The
+      // switch exists for the day a link problem needs the radio quiet.
+      case 0x06:
+        if (v.size() >= 2) {
+          rawEnabled = v.data()[1] != 0;
+          rawN = 0;
+          Serial.printf("[ble] raw stream %s\n", rawEnabled ? "on" : "off");
+        }
         break;
     }
   }
@@ -889,6 +954,9 @@ void setup() {
   NimBLEService *svc = bleServer->createService(SVC_UUID);
   chTele = svc->createCharacteristic(TELE_UUID, NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ);
   chStat = svc->createCharacteristic(STAT_UUID, NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ);
+  // Notify-only: nothing ever reads the raw stream on demand, and leaving READ
+  // off keeps a curious client from pulling one stale batch out of context.
+  chRaw  = svc->createCharacteristic(RAW_UUID, NIMBLE_PROPERTY::NOTIFY);
   NimBLECharacteristic *ctrl = svc->createCharacteristic(
       CTRL_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   ctrl->setCallbacks(new CtrlCB());
@@ -952,7 +1020,8 @@ void otaSetMode(bool on) {
                "cal sys/gyro/accel %d/%d/%d, quatRejects %lu\n"
                "baro %.1f m, temp %.1f C\n"
                "CAN %s, %lu frames\n\n"
-               "/log for recent debug lines\n",
+               "/log     recent debug lines\n"
+               "/update  flash new firmware from a phone browser\n",
                __DATE__, __TIME__, millis() / 1000UL, (int)esp_reset_reason(),
                (unsigned)ESP.getFreeHeap(), fixValid() ? 1 : 0,
                gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
@@ -970,10 +1039,103 @@ void otaSetMode(bool on) {
       }
       httpd.send(200, "text/plain", out);
     });
+
+    // ---- flashing from a phone ----
+    // ArduinoOTA speaks espota, which only the Arduino tooling implements —
+    // fine from a laptop, useless from a phone. This is the same firmware
+    // image pushed through an ordinary HTML file upload instead, so anything
+    // with a browser can flash the puck while it stays bolted to the bike.
+    // Safari's file picker reaches iCloud Drive and Files, so AirDrop the .bin
+    // from the Mac once and the laptop never has to come near the bike again.
+    httpd.on("/update", HTTP_GET, []() {
+      httpd.send(200, "text/html",
+        "<!DOCTYPE html><html><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>Flash puck</title><style>"
+        "body{font:17px -apple-system,sans-serif;margin:0;padding:28px 22px;"
+        "background:#faf9f7;color:#22201d}h1{font-size:19px;margin:0 0 6px}"
+        "p{color:#7a736b;font-size:14px;margin:0 0 22px}"
+        "input[type=file]{display:block;margin:0 0 18px;width:100%}"
+        "button{font:600 17px -apple-system,sans-serif;background:#2a78d6;"
+        "color:#fff;border:0;border-radius:9px;padding:14px 22px;width:100%}"
+        "#s{margin-top:18px;font-size:15px}</style></head><body>"
+        "<h1>Flash puck</h1><p>Pick the firmware .bin, then Upload. "
+        "Do not lock the phone or leave this page while it runs. "
+        "The puck reboots by itself when it finishes.</p>"
+        "<form id=f method=POST action='/update' enctype='multipart/form-data'>"
+        "<input type=file name=fw accept='.bin,application/octet-stream' required>"
+        "<button type=submit>Upload</button></form><div id=s></div>"
+        "<script>"
+        // XHR rather than a plain submit so the phone shows real progress —
+        // a 1.4 MB upload over SoftAP takes long enough that a blank white
+        // page reads as a hang, and a reload mid-flash bricks the puck.
+        "var f=document.getElementById('f'),s=document.getElementById('s');"
+        "f.onsubmit=function(e){e.preventDefault();"
+        "var x=new XMLHttpRequest();x.open('POST','/update');"
+        "x.upload.onprogress=function(p){if(p.lengthComputable)"
+        "s.textContent='Uploading '+Math.round(p.loaded/p.total*100)+'%'};"
+        "x.onload=function(){s.textContent=x.responseText||'done'};"
+        "x.onerror=function(){s.textContent='Upload failed - stay on the "
+        "Tripper AP and try again'};"
+        "s.textContent='Starting...';x.send(new FormData(f));return false};"
+        "</script></body></html>");
+    });
+    // Two handlers: the second runs per chunk as the body streams in, the
+    // first only once the whole body has been consumed.
+    httpd.on("/update", HTTP_POST, []() {
+      bool ok = !Update.hasError();
+      httpd.sendHeader("Connection", "close");
+      httpd.send(200, "text/plain",
+                 ok ? "OK - puck rebooting into the new firmware"
+                    : "FAILED - puck kept the old firmware");
+      logLine("[ota] http update %s", ok ? "ok, rebooting" : "FAILED");
+      if (ok) { delay(400); ESP.restart(); }
+    }, []() {
+      HTTPUpload &up = httpd.upload();
+      if (up.status == UPLOAD_FILE_START) {
+        logLine("[ota] http update starting: %s", up.filename.c_str());
+        // UPDATE_SIZE_UNKNOWN: a browser upload has no reliable length up
+        // front, so let the Update library size it against the free OTA slot.
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+          logLine("[ota] Update.begin failed: %s", Update.errorString());
+        }
+      } else if (up.status == UPLOAD_FILE_WRITE) {
+        if (Update.write(up.buf, up.currentSize) != up.currentSize) {
+          logLine("[ota] write failed: %s", Update.errorString());
+        }
+      } else if (up.status == UPLOAD_FILE_END) {
+        if (!Update.end(true)) {
+          logLine("[ota] Update.end failed: %s", Update.errorString());
+        }
+      } else if (up.status == UPLOAD_FILE_ABORTED) {
+        // Phone locked, browser backgrounded, or the user walked out of range.
+        // Abort explicitly so the next attempt starts from a clean slot.
+        Update.abort();
+        logLine("[ota] http update aborted by client");
+      }
+    });
+
+    // iOS probes this URL the moment it joins a network and expects Apple's
+    // exact success body. Without it the phone decides there is no internet,
+    // shows the captive-portal sheet, and can silently drop back to cellular —
+    // at which point 192.168.4.1 is unreachable and the whole thing looks
+    // broken for no visible reason. Android and Windows probe their own URLs;
+    // onNotFound covers those and anything else with the same answer.
+    httpd.on("/hotspot-detect.html", []() {
+      httpd.send(200, "text/html",
+                 "<HTML><HEAD><TITLE>Success</TITLE></HEAD>"
+                 "<BODY>Success</BODY></HTML>");
+    });
+    httpd.onNotFound([]() {
+      httpd.send(200, "text/html",
+                 "<HTML><HEAD><TITLE>Success</TITLE></HEAD>"
+                 "<BODY>Success</BODY></HTML>");
+    });
+
     httpd.begin();
     otaActive = true;
     logLine("[ota] AP \"%s\" up at %s — IDE network port %s.local; "
-            "http://192.168.4.1/ and /log for diagnostics",
+            "http://192.168.4.1/ status, /log debug, /update flash from a phone",
             OTA_AP_SSID, WiFi.softAPIP().toString().c_str(), OTA_HOSTNAME);
   } else {
     httpd.stop();
@@ -1084,6 +1246,57 @@ void loop() {
     imuWinN++;
     float g = lastLin.magnitude() / 9.80665f;
     if (g > maxG_g) maxG_g = g;
+
+    // ---- raw flight recorder ----
+    // Same tick, same snapshot as the means above: the whole point is that this
+    // is the un-averaged version of exactly what the packet carries.
+    if (rawEnabled) {
+      if (rawN == 0) rawT0 = now;
+      RawSample &s = rawBuf[rawN];
+      // Clamped rather than wrapped. A saturated sample is obvious in analysis;
+      // a wrapped one reads as a violent rotation that never happened.
+      auto cl16 = [](double v) -> int16_t {
+        return (int16_t)(v > 32767.0 ? 32767.0 : (v < -32768.0 ? -32768.0 : v));
+      };
+      s.gx = cl16(lastGyro.x() * 100.0);
+      s.gy = cl16(lastGyro.y() * 100.0);
+      s.gz = cl16(lastGyro.z() * 100.0);
+      s.ax = cl16(lastAcc.x() / 9.80665 * 1000.0);
+      s.ay = cl16(lastAcc.y() / 9.80665 * 1000.0);
+      s.az = cl16(lastAcc.z() / 9.80665 * 1000.0);
+      rawN++;
+      if (rawN >= RAW_BATCH_N) {
+        if (bleServer->getConnectedCount() > 0) {
+          uint8_t buf[sizeof(RawBatch) + sizeof(rawBuf)];
+          RawBatch *h = (RawBatch *)buf;
+          memset(h, 0, sizeof(RawBatch));
+          h->ver = 0x01;
+          h->count = rawN;
+          h->period_us100 = 100;          // 10.000 ms nominal; t0_ms is the truth
+          h->t0_ms = rawT0;
+          // lastQuat, not qRel(): the mount zero is an app-side convention that
+          // may be re-derived later, and a log that has already applied it can
+          // never be un-applied.
+          h->qw = (int16_t)(lastQuat.w() * 16384);
+          h->qx = (int16_t)(lastQuat.x() * 16384);
+          h->qy = (int16_t)(lastQuat.y() * 16384);
+          h->qz = (int16_t)(lastQuat.z() * 16384);
+          h->press_pa = (int32_t)lastPressPa;
+          h->temp_x10 = (int16_t)(lastTempC * 10);
+          // The globals the 1 Hz status block already refreshes. Re-reading the
+          // chip ten times a second would spend I2C budget this bus does not
+          // have — it runs at 100 kHz because the BNO055 stretches the clock —
+          // on four numbers that change over tens of seconds.
+          h->calSys = calSys; h->calGyr = calGyro;
+          h->calAcc = calAcc; h->calMag = calMag;
+          memcpy(buf + sizeof(RawBatch), rawBuf, sizeof(RawSample) * rawN);
+          chRaw->setValue(buf, sizeof(RawBatch) + sizeof(RawSample) * rawN);
+          chRaw->notify();
+          rawBatches++;
+        }
+        rawN = 0;
+      }
+    }
   }
 
   // 5 Hz telemetry

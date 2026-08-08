@@ -104,6 +104,73 @@ reboots into the new image → the OTA network *vanishes* (the mode never
 survives a reboot, by design) → the Mac drops back to its normal WiFi → the
 app's toggle snaps off by itself and the puck is back on BLE within seconds.
 
+## Making a `.bin`
+
+Needed for the phone route below, and for handing a build to someone who has
+no toolchain. `--output-dir` is the only difference from a normal compile:
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 \
+  --output-dir ~/Desktop/puck-bin \
+  ~/Documents/GitHub/Untitled/Tripper-DL1/hardware/firmware/tripper_light
+```
+
+That directory then holds nine files and **only one of them is the firmware
+you flash** (sizes from the 2026-08-08 Light build):
+
+| File | ~size | What it is |
+|---|---|---|
+| **`tripper_light.ino.bin`** | **1.2 MB** | **The application image. This is the one.** |
+| `tripper_light.ino.bootloader.bin` | 20 KB | Second-stage bootloader; written only on a first USB flash of a blank chip |
+| `tripper_light.ino.partitions.bin` | 3 KB | Partition table; same — only on a blank chip |
+| `tripper_light.ino.merged.bin` | 8 MB | All of the above glued into one whole-flash image, for factory programming |
+| `*_flashed.bin` | — | Byte-identical copies arduino-cli leaves behind showing what it sent |
+| `tripper_light.ino.elf` / `.map` | 19 MB each | Debug symbols. Not firmware. |
+
+Two traps. `merged.bin` is the biggest file with the most reassuring name and
+is **wrong** for OTA — it is a whole-flash image, not an app image. And an
+app image starts with byte `0xE9` while `partitions.bin` starts `0xAA`, which
+is the quickest way to tell you grabbed the wrong thing:
+
+```bash
+xxd -p -l1 ~/Desktop/puck-bin/tripper_light.ino.bin   # -> e9
+```
+
+Rule of thumb: the file ending in exactly `.ino.bin`, about 1.2 MB. Anything
+8 MB is the wrong file. For reference the XIAO's default layout gives roughly
+3.3 MB per app slot, so 1.2 MB leaves plenty of room.
+
+## Flashing from a `.bin` — phone only, no laptop at the bike
+
+The puck is bolted to the bike; this route needs nothing but the phone. It
+works because the puck serves an ordinary HTML upload form at `/update` while
+flashing mode is on — no arduino-cli, no espota, just a browser. (ArduinoOTA
+speaks espota, which only the Arduino tooling implements, which is why the
+laptop used to be mandatory.)
+
+AirDrop `tripper_light.ino.bin` to the phone once — it lands in Files — then:
+
+1. Tripper app: **Settings → Tripper Puck → WiFi flashing mode** on.
+2. Phone WiFi: join `Tripper-Light-OTA`, password `tripper-ota`.
+3. Safari → `http://192.168.4.1/update`
+4. **Choose File** → pick the `.bin` → **Upload**.
+
+A percentage appears while it runs. Do not lock the phone, switch apps, or
+reload the page mid-upload — a browser retry part-way through a write is how
+a puck gets bricked. If the transfer does die, the firmware aborts the write
+so the slot is clean; just start again. When it finishes the puck reboots
+itself, the OTA network vanishes, and the app's toggle snaps off on its own.
+
+The same endpoint works from the Mac when arduino-cli is not to hand:
+
+```bash
+curl -F "fw=@$HOME/Desktop/puck-bin/tripper_light.ino.bin" \
+  http://192.168.4.1/update
+```
+
+Recovery is unchanged: USB always works and needs nothing from the running
+firmware.
+
 ## Diagnostics over the same network
 
 While the flashing network is up, the puck also serves what used to require
@@ -113,6 +180,7 @@ the USB cable:
 curl http://192.168.4.1/        # one-page live status: build, uptime, reset
                                 # reason, heap, cal, quatRejects, baro, CAN
 curl http://192.168.4.1/log     # the last ~8 KB of debug lines, oldest first
+curl http://192.168.4.1/update  # the upload form (open this one in a browser)
 ```
 
 (Or open the same URLs in a browser.) The log ring lives in RAM **from
@@ -142,3 +210,16 @@ files; the puck is deliberately stateless.
   path needs nothing from the firmware to work.
 - **`arduino-cli` seems hung on compile** — first build of a core version;
   give it minutes, or re-run with `-v`.
+- **`Can't open sketch: no such file or directory`** — the sketch path is a
+  *folder* containing an `.ino` of the same name, and it is relative to where
+  you are standing. From inside `tripper_light/`, the argument is `.`; from
+  `hardware/firmware/`, it is `tripper_light`. The absolute path always works.
+- **iOS says "no internet" and drops the OTA network** — the firmware answers
+  Apple's captive-portal probe to prevent exactly this, so seeing it means
+  firmware older than the `/update` feature. Tap "Use Without Internet" to
+  finish this flash; the next build fixes it permanently.
+- **Phone upload fails part-way** — nothing is half-written; the firmware
+  aborts the slot on a broken transfer. Rejoin the network and start again.
+  Do not reload the page while a percentage is still climbing.
+- **Uploaded and the puck went quiet** — you probably sent `merged.bin`
+  instead of `.ino.bin`. USB recovery, then re-read the table above.

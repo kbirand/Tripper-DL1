@@ -1,6 +1,9 @@
 .DS_Store
 build/
 *.bin
+# ...except the released app image, kept in the repo so it can be AirDropped
+# to a phone and flashed at the bike with no toolchain. See docs/flashing.md.
+!hardware/firmware/bin/*.bin
 .venv/
 __pycache__/
 *.asc
