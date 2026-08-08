@@ -341,7 +341,7 @@ Arduino sketches in [`hardware/firmware/`](hardware/firmware/):
 
 | Sketch | Purpose |
 |---|---|
-| [`tripper_light`](hardware/firmware/tripper_light/) | **Light-build firmware** — IMU + baro + CAN → BLE. No GPS/OLED/button code at all; marker and mount-zero arrive as control writes. Same UUIDs and same 70-byte packet as the Full build |
+| [`tripper_light`](hardware/firmware/tripper_light/) | **Light-build firmware** — IMU + baro + CAN → BLE. No GPS/OLED/button code at all; marker and mount-zero arrive as control writes. Same UUIDs and same 86-byte packet as the Full build |
 | [`tripper_puck`](hardware/firmware/tripper_puck/) | **Full-build firmware** — sensors + GPS → BLE + OLED |
 | [`bench_imu_can`](hardware/firmware/bench_imu_can/) | Bring-up rig for a half-built puck — IMU + baro + CAN only, no OLED/buttons/GPS. Talks to the BNO055 registers directly (a library `begin()` can't tell a phantom ACK from a chip), counts every failed read, and re-probes missing sensors every 3 s so a wire soldered mid-run comes up on its own. Same BLE UUIDs and packets as production |
 | [`i2c_gate`](hardware/firmware/i2c_gate/) | BNO055 clock-stretch stress test (the go/no-go gate) |
@@ -365,6 +365,15 @@ arduino-cli lib install "Adafruit SSD1306" "TinyGPSPlus"
 arduino-cli compile -b esp32:esp32:XIAO_ESP32S3 hardware/firmware/tripper_puck
 arduino-cli upload  -b esp32:esp32:XIAO_ESP32S3 -p /dev/cu.usbmodem* hardware/firmware/tripper_puck
 ```
+
+USB is needed exactly twice in a puck's life — the first flash of an
+OTA-capable firmware, and recovery if an update bricks it. After that the puck
+raises its own WiFi network on request and can be flashed from a laptop *or
+straight from a phone browser* with the bike untouched; the last built image is
+committed at [`releases/`](releases/) so no toolchain is needed at all.
+**[`docs/flashing.md`](docs/flashing.md) is the complete reference** —
+networks, passwords, both command lines, making a `.bin`, and which of the nine
+build artifacts is the one you flash.
 
 ⚠️ **Never plug USB in while the BEC is powered, and never while the CAN pair
 is spliced in** — see [Bike CAN bus](#bike-can-bus-talaria). Unplug the 2-pin
@@ -413,20 +422,21 @@ falls back to the clock if it was showing.
 
 ## BLE protocol
 
-Device name `Tripper-DL1`. One service, three characteristics:
+Device name `Tripper-DL1`. One service, four characteristics:
 
 | UUID | Char | Direction |
 |---|---|---|
 | `8E7C1A20-0F5A-4B9C-9C90-54B1D2A70001` | *service* | |
-| `…0002` | telemetry | notify + read, 5 Hz, 70 B |
-| `…0003` | status | notify + read, 1 Hz, 14 B |
+| `…0002` | telemetry | notify + read, 5 Hz, 86 B |
+| `…0003` | status | notify + read, 1 Hz, 15 B |
 | `…0004` | control | write / write-no-response |
+| `…0005` | raw | notify, 10 Hz, 148 B — the un-averaged 100 Hz IMU stream |
 
 ### Telemetry packet (86 bytes, little-endian, packed)
 
 | Offset | Type | Field | Notes |
 |---|---|---|---|
-| 0 | u8 | ver | `0x04` — `0x03` was the 78-byte packet with no raw accelerometer, `0x02` the 70-byte one with no IMU health, `0x01` the 50-byte pre-CAN one |
+| 0 | u8 | ver | `0x05` — byte-identical *layout* to `0x04`; the bump marks a semantics change (see `gyr`/`acc` below). `0x03` was the 78-byte packet with no raw accelerometer, `0x02` the 70-byte one with no IMU health, `0x01` the 50-byte pre-CAN one |
 | 1 | u8 | flags | bit0 fix valid · bit1 time valid · bit2 IMU calibration usable |
 | 2 | u32 | gpsTimeMs | UTC ms-of-day, `0xFFFFFFFF` if invalid |
 | 6 | i32 | lat_e7 | degrees × 1e7 |
@@ -454,10 +464,10 @@ Device name `Tripper-DL1`. One service, three characteristics:
 | 66 | u8 | cellHi_idx | its index, 1–16 |
 | 67 | u16 | cellLo_mv | lowest cell, mV |
 | 69 | u8 | cellLo_idx | its index, 1–16 |
-| 70 | i16×3 | gyr x y z | raw gyro, deg/s × 16 (sensor frame) |
+| 70 | i16×3 | gyr x y z | gyro, deg/s × 16 (sensor frame). **`0x05`: the mean of the 200 ms window**, not the newest 100 Hz sample |
 | 76 | u8 | calib | bits 7:6 sys · 5:4 gyro · 3:2 accel · 1:0 mag, each 0–3 |
 | 77 | u8 | zeroCount | mount zeros the puck has **accepted** since boot |
-| 78 | i16×3 | acc x y z | **raw** accelerometer, mg (sensor frame) — gravity included, pre-fusion |
+| 78 | i16×3 | acc x y z | **raw** accelerometer, mg (sensor frame) — gravity included, pre-fusion. **`0x05`: window mean**, as `gyr` |
 | 84 | u16 | quatRejects | non-unit `getQuat()` reads dropped since boot, saturating |
 
 Bytes 50–69 are the bike's CAN bus, read listen-only from a SN65HVD230 on
@@ -503,10 +513,23 @@ from a recording. `quatRejects` should stay flat; a count that climbs mid-ride
 means the attitude is being *held* across glitched I2C reads rather than
 tracking the bike.
 
-### Status packet (14 bytes)
+**Why `0x05` averages.** Through `0x04` these two fields carried whichever
+100 Hz sample happened to land when the packet was built — 1 in 20 reached the
+app and the other 19 were discarded, so a single vibration spike could be the
+one that got through. `0x05` sends the mean of all 20 instead. The layout did
+not move a byte, which is why an app that ignores the version still parses it.
+
+That fixed the spikes and introduced a subtler problem: a mean is a boxcar
+filter, and a boxcar has a first sidelobe only 13 dB down. Suspension
+resonance (2–5 Hz) and wheel hop (10–20 Hz) are above the 2.5 Hz Nyquist of a
+5 Hz output, so they **alias** into the road-grade band rather than being
+removed, and no amount of downstream filtering can separate them again. That
+is what the raw characteristic below exists for.
+
+### Status packet (15 bytes)
 
 `ver u8 · fix u8 · sats u8 · battPct u8 (0xFF = external supply) · hdop_c u16 ·
-uptime_s u32 · temp_x10 i16 · marker u8 · caps u8`
+uptime_s u32 · temp_x10 i16 · marker u8 · caps u8 · otaState u8`
 
 The last byte was `reserved` (always 0) and now carries **capability bits**, so
 the app can tell the builds apart — chiefly to know whether it must supply
@@ -523,6 +546,48 @@ So Light sends `0x08` and Full sends `0x0F`. **A value of `0` means firmware
 older than this field**, not "no capabilities" — which is why `has CAN` is an
 explicit bit rather than assumed.
 
+`otaState` (byte 14) reports WiFi flashing mode as the puck actually has it,
+not as the app last asked for it: `0` off · `1` network up with no client ·
+`1+n` with n clients joined. The app's toggle reads this back so it shows the
+truth after a reconnect, and the mode never survives a power cycle. Length-gate
+it — a 14-byte status packet is older firmware, not `otaState = 0`.
+
+### Raw stream (148 bytes per batch, little-endian, packed)
+
+The flight recorder: the 100 Hz IMU samples themselves, no averaging. Ten per
+notification, ten notifications a second — about 1.5 kB/s against the 185 B ATT
+MTU iOS negotiates, so one batch is one notification.
+
+| Offset | Type | Field | Notes |
+|---|---|---|---|
+| 0 | u8 | ver | `0x01` |
+| 1 | u8 | count | RawSamples following the header (10) |
+| 2 | u16 | period_us100 | nominal sample period, units of 100 µs (`100` = 10 ms) |
+| 4 | u32 | t0_ms | **puck** millis at the first sample in this batch |
+| 8 | i16×4 | qw qx qy qz | the BNO055's own fusion quaternion, ×16384, **unzeroed** |
+| 16 | i32 | press_pa | raw pressure — *not* converted altitude |
+| 20 | i16 | temp_x10 | °C × 10 |
+| 22 | u8×4 | calSys calGyr calAcc calMag | 0–3 each |
+| 26 | u8×2 | pad | |
+| 28 | i16×6 | gx gy gz ax ay az | ×10 samples: gyro deg/s × 100, accel mg |
+
+**`t0_ms` is the whole point of the header.** BLE delivers in bursts, so the
+phone's arrival time is not when the sample was taken. At 5 Hz nobody noticed;
+at 100 Hz it would corrupt every derivative computed downstream. Reconstruct
+the timeline from the puck's own counter and the nominal period, and use the
+phone's clock only to anchor the start of the ride.
+
+Everything here is **raw and un-decided**: pressure rather than altitude
+because the conversion is lossy, the quaternion unzeroed because the mount
+reference is an app-side convention that may be re-derived later, and samples
+rather than means because a mean cannot be un-averaged. The chip's own fusion
+is logged even though it was convicted (see
+[`docs/data-quality-audit.md`](docs/data-quality-audit.md)) on the grounds that
+a verdict nobody can re-test is an opinion.
+
+The stream is **additive**: a phone that never subscribes sees the puck behave
+exactly as it did before the characteristic existed.
+
 ### Control opcodes
 
 | Byte | Payload | Action |
@@ -531,8 +596,10 @@ explicit bit rather than assumed.
 | `0x02` | — | Zero the mount at the current orientation — same as the 10 s button hold on Full, the only way to do it on Light. Saved to flash on both. Refused while accel calibration is under 3/3 |
 | `0x03` | — | Identify — **Full:** OLED inverts for 2 s. **Light:** accepted and logged, no indicator to flash |
 | `0x04` | `active u8 · elapsed_s u32` | Ride state — **Full:** inverts the OLED and adds the trip-time screen, elapsed seeds the timer. **Light:** accepted and logged, no display. The app re-sends it on every reconnect |
+| `0x05` | `on u8` | WiFi flashing mode — raises the puck's own SoftAP for OTA and the diagnostics/`/update` web server. Never persists across a power cycle. Live state comes back in `otaState`. See [`docs/flashing.md`](docs/flashing.md) |
+| `0x06` | `on u8` | Raw 100 Hz stream on/off. **Boots on** — every ride should be a regression test, and the phone decides whether to keep the bytes. The switch is there for the day a link problem needs the radio quiet |
 
-Both builds accept all four opcodes, so the app never has to withhold a write.
+Both builds accept all six opcodes, so the app never has to withhold a write.
 
 ## IMU calibration
 
@@ -687,3 +754,15 @@ results, pitfalls — lives in [`hardware/build-guide.html`](hardware/build-guid
 What the **app** side has to do differently — the capability byte, the regen
 level, gating on `canFlags`, and why `battPct` is a sentinel rather than a
 reading — is in [`docs/app-integration.md`](docs/app-integration.md).
+
+| Doc | What it covers |
+|---|---|
+| [`docs/flashing.md`](docs/flashing.md) | Flashing over USB, WiFi and from a phone; making a `.bin`; wireless diagnostics |
+| [`docs/data-quality-audit.md`](docs/data-quality-audit.md) | What the recordings actually contain, and where they lie |
+| [`docs/lean-investigation.md`](docs/lean-investigation.md) | Why the BNO055's fusion is not trusted for attitude |
+| [`docs/direct-attitude-sensing.md`](docs/direct-attitude-sensing.md) | What a hardware answer to pitch/roll would cost |
+| [`CLAUDE.md`](CLAUDE.md) | Handoff notes — conventions, verdicts, and what not to relitigate |
+
+Replay tooling for `.trip` recordings is in [`tools/`](tools/): `triplib.py`
+decodes the LZFSE container, `harness.py` re-runs an estimator over a recording
+so a change can be scored against a ride instead of guessed at.
