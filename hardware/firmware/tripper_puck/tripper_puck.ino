@@ -4,10 +4,11 @@
 // Stateless BLE sensor: boots with the bike, streams telemetry to the
 // Tripper app. No SD, no battery management — the phone is the recorder.
 //
-//   100 Hz  BNO055 quaternion + linear accel (IMUPLUS), latch interval max-g
+//   100 Hz  BNO055 quaternion + linear accel (IMUPLUS), latch interval max-g,
+//           gyro/raw-accel window sums (the packet sends the 200 ms mean)
 //   5 Hz    GPS epochs (module pre-configured; re-configured at every boot)
-//   5 Hz    BLE telemetry notify (78-byte packed sample)
-//   1 Hz    BLE status notify, baro sample, serial debug line
+//   5 Hz    BLE telemetry notify (86-byte packed sample) + BMP280 baro sample
+//   1 Hz    BLE status notify, baro temperature, serial debug line
 //   2 Hz    OLED refresh — clock / live data / bike CAN (/ trip time)
 //   ~92/s   Talaria CAN frames, listen-only (SN65HVD230 on D8/D9)
 //
@@ -29,7 +30,8 @@
 // 0x04 + [active u8][elapsed s u32 LE] = ride state — while active the OLED
 // runs inverted and a third screen (trip time) joins the cycle. The app
 // re-sends it on every reconnect, so a link flap or puck reboot mid-ride
-// self-heals.
+// self-heals. · 0x05 + [on u8] = WiFi flashing mode (SoftAP + ArduinoOTA,
+// see the OTA block below).
 
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
@@ -41,6 +43,63 @@
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <driver/twai.h>
+#include <WiFi.h>
+#include <ArduinoOTA.h>
+#include <WebServer.h>
+#include <esp_system.h>
+
+// ---------- OTA (flashing over WiFi) ----------
+// The puck lives inside an enclosure on the bike, so every USB flash means
+// dismounting it. Instead the puck raises its OWN network on demand: the app's
+// Settings toggle (control write 0x05) starts a SoftAP; the computer joins it,
+// and the puck appears as a NETWORK PORT in Arduino IDE (Tools -> Port ->
+// "tripper-puck at 192.168.4.1"). Upload works from the desk with the puck
+// still on the bike, anywhere — no home-network credentials in the firmware,
+// nothing to configure per location.
+//
+// The mode is deliberately NOT persistent: a bike power cycle always boots
+// into normal riding with the WiFi radio off, so a toggle forgotten overnight
+// can't leave an open AP riding around. The status packet reports the live
+// state (see StatusPacket::otaState) so the app's toggle shows the truth.
+// Needs a partition scheme with two app slots — the XIAO ESP32S3 default
+// (8MB with OTA) is one. USB remains the recovery path if an update bricks.
+// Keep in step with tripper_light.ino ("Tripper-Light-OTA" / "tripper-light").
+#define OTA_AP_SSID     "Tripper-Puck-OTA"
+#define OTA_AP_PASS     "tripper-ota"   // WPA2 needs >= 8 chars
+#define OTA_HOSTNAME    "tripper-puck"  // the network-port name in the IDE
+#define OTA_PASSWORD    "tripper"       // IDE prompts for this before upload
+
+bool otaActive = false;                 // SoftAP up, ArduinoOTA polled
+
+// While the AP is up, the puck also serves diagnostics over HTTP — the same
+// lines that go to USB serial, without the cable:
+//   http://192.168.4.1/     one-page live status
+//   http://192.168.4.1/log  the last ~8 KB of debug lines, oldest first
+// The ring lives in RAM from boot, so lines logged long BEFORE the toggle
+// are still there when the network comes up — turn it on after something
+// odd and read what the puck said at the time. Lost on power cycle.
+// Keep in step with tripper_light.ino.
+WebServer httpd(80);
+static char logRing[8192];              // zero-initialised; NULs are skipped
+static size_t logHead = 0;
+
+// printf-alike that mirrors every line to USB serial and the ring. The 1 Hz
+// [dbg] line goes through here; one-off boot/event lines can too.
+void logLine(const char *fmt, ...) {
+  char line[320];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(line, sizeof(line) - 1, fmt, ap);
+  va_end(ap);
+  if (n < 0) return;
+  if (n > (int)sizeof(line) - 1) n = sizeof(line) - 1;
+  line[n++] = '\n';
+  Serial.write((const uint8_t *)line, n);
+  for (int i = 0; i < n; i++) {
+    logRing[logHead] = line[i];
+    logHead = (logHead + 1) % sizeof(logRing);
+  }
+}
 
 // ---------- pins & constants ----------
 // I2C on the XIAO's default pads. Stated explicitly rather than relying on a
@@ -91,7 +150,9 @@ static const char *CTRL_UUID = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70004";
 
 // ---------- packets (little-endian, packed) ----------
 struct __attribute__((packed)) TelemetryPacket {
-  uint8_t  ver;          // 0x04
+  uint8_t  ver;          // 0x05 — byte-identical layout to 0x04; the bump marks
+                         // a semantics change: gyr*/acc* below are 200 ms
+                         // window MEANS, not the newest 100 Hz sample
   uint8_t  flags;        // bit0 fix valid · bit1 time valid · bit2 IMU
                          // calibration usable (live 3/3 or restored from flash)
   uint32_t gpsTimeMs;    // UTC ms of day, 0xFFFFFFFF if invalid
@@ -128,6 +189,12 @@ struct __attribute__((packed)) TelemetryPacket {
   // parsing. Raw gyro and calibration used to stay on the puck, which is why
   // an attitude fault took a GPS cross-check to diagnose rather than a look at
   // the recording. Keep in step with tripper_light.ino.
+  //
+  // Since ver 0x05 these carry the MEAN over the 200 ms packet window (about
+  // 20 samples at 100 Hz), not the single newest sample. The app integrates
+  // this field for lean, and a mean is exactly the integral over the window
+  // divided by its length — the instantaneous sample it replaced threw away
+  // 19 of every 20 measurements and aliased engine vibration into lean.
   int16_t  gyrx_d16, gyry_d16, gyrz_d16;   // sensor-frame gyro, deg/s * 16
   uint8_t  calib;        // bits 7:6 sys · 5:4 gyro · 3:2 accel · 1:0 mag
   // Increments on every mount zero the puck actually ACCEPTS, so the app can
@@ -147,6 +214,9 @@ struct __attribute__((packed)) TelemetryPacket {
   // accelerometer. Subtract lin*_mg and what remains is the fusion's own idea
   // of down — which is what the whole attitude rests on. Keep in step with
   // tripper_light.ino.
+  // Since ver 0x05: the 200 ms window mean, same reasoning as the gyro above.
+  // The app low-passes this field anyway, so averaging on the puck only moves
+  // the first (and heaviest) stage of that filter to where all the samples are.
   int16_t  accx_mg, accy_mg, accz_mg;   // sensor-frame accelerometer, mg
   // Non-unit getQuat() results dropped since boot, saturating. Printed to USB
   // since the first build and never recorded; a count that climbs mid-ride
@@ -165,8 +235,12 @@ struct __attribute__((packed)) StatusPacket {
   int16_t  temp_x10;     // BMP280 °C * 10
   uint8_t  marker;
   uint8_t  caps;         // was `reserved` (always 0) — now the capability bits
+  // WiFi flashing state, appended like the telemetry tail (ver stays 0x01,
+  // the app length-gates): 0 = off · 1 = AP up, no client · 1+n = n clients
+  // joined. The app's toggle is only a request; this is the confirmation.
+  uint8_t  otaState;
 };
-static_assert(sizeof(StatusPacket) == 14, "status packet size drifted");
+static_assert(sizeof(StatusPacket) == 15, "status packet size drifted");
 
 // ---------- devices ----------
 Adafruit_BNO055   bno = Adafruit_BNO055(55, 0x28, &Wire);
@@ -200,6 +274,11 @@ imu::Quaternion lastQuat;
 imu::Vector<3> lastLin;
 imu::Vector<3> lastGyro;                // sensor frame, deg/s
 imu::Vector<3> lastAcc;                 // sensor frame, m/s² — RAW, pre-fusion
+// 200 ms window sums for the telemetry means (ver 0x05). Plain doubles rather
+// than imu::Vector so the accumulate can't lose precision over the window.
+double gyroSumX = 0, gyroSumY = 0, gyroSumZ = 0;
+double accSumX = 0, accSumY = 0, accSumZ = 0;
+uint16_t imuWinN = 0;                   // samples in the sums (~20 per packet)
 // BNO055 calibration, refreshed at 1 Hz. IMUPLUS has no magnetometer, so the
 // accelerometer is the only thing that knows where down is: calAcc is what
 // decides whether a mount zero means anything, and calMag stays 0 forever.
@@ -235,6 +314,8 @@ volatile bool     bleZeroReq = false;   // 0x02 control write, consumed in loop(
 volatile bool     bleRideMsg = false;   // 0x04 control write latched below
 volatile uint8_t  bleRideActiveB = 0;
 volatile uint32_t bleRideElapsedS = 0;
+volatile bool     bleOtaMsg = false;    // 0x05 control write latched below
+volatile uint8_t  bleOtaOnB = 0;
 
 void IRAM_ATTR isrBtn1() {
   uint32_t t = millis();
@@ -471,6 +552,9 @@ class CtrlCB : public NimBLECharacteristicCallbacks {
                             ((uint32_t)v.data()[4] << 16) | ((uint32_t)v.data()[5] << 24);
           bleRideMsg = true;
         }
+        break;
+      case 0x05:                                                        // WiFi flashing mode
+        if (v.size() >= 2) { bleOtaOnB = v.data()[1]; bleOtaMsg = true; }
         break;
     }
   }
@@ -730,6 +814,10 @@ void setup() {
   Serial.setTxTimeoutMs(0);
   delay(1500);
   Serial.println("\n=== Tripper Puck firmware (e-bike/BLE) ===");
+  // Into the wireless ring too, so /log always opens with how this boot began
+  // — reset reason distinguishes a power cycle from a crash from an OTA.
+  logLine("[boot] FULL build %s %s, reset reason %d",
+          __DATE__, __TIME__, (int)esp_reset_reason());
 
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_BUTTON2, INPUT_PULLUP);
@@ -833,6 +921,70 @@ void setup() {
   }
 }
 
+// The single path in and out of WiFi flashing mode, driven by control write
+// 0x05. On: raise the SoftAP and start ArduinoOTA — the puck becomes network
+// "Tripper-Puck-OTA" at 192.168.4.1 and a network port in Arduino IDE for
+// any computer that joins. Off: tear both down and kill the radio.
+void otaSetMode(bool on) {
+  if (on == otaActive) return;
+  if (on) {
+    WiFi.mode(WIFI_AP);
+    // Two clients max: this is a flashing jig, not infrastructure.
+    if (!WiFi.softAP(OTA_AP_SSID, OTA_AP_PASS, 6, 0, 2)) {
+      logLine("[ota] softAP failed to start");
+      WiFi.mode(WIFI_OFF);
+      return;
+    }
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+    ArduinoOTA.onStart([]() { logLine("[ota] update starting"); });
+    ArduinoOTA.onEnd([]() { logLine("[ota] update done, rebooting"); });
+    ArduinoOTA.onError([](ota_error_t e) { logLine("[ota] error %u", e); });
+    ArduinoOTA.begin();
+    // Diagnostics over the same network — status at /, recent log at /log.
+    httpd.on("/", []() {
+      char out[512];
+      snprintf(out, sizeof(out),
+               "Tripper puck - FULL build\n"
+               "fw built %s %s (packet v0x05)\n"
+               "uptime %lus, reset reason %d, free heap %u\n"
+               "fix %d, sats %d\n"
+               "cal sys/gyro/accel %d/%d/%d, quatRejects %lu\n"
+               "baro %.1f m, temp %.1f C\n"
+               "CAN %s, %lu frames\n\n"
+               "/log for recent debug lines\n",
+               __DATE__, __TIME__, millis() / 1000UL, (int)esp_reset_reason(),
+               (unsigned)ESP.getFreeHeap(), fixValid() ? 1 : 0,
+               gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
+               calSys, calGyro, calAcc, (unsigned long)quatRejects,
+               lastBaroAlt, lastTempC,
+               canOk ? "ok" : "FAIL", (unsigned long)canS.frames);
+      httpd.send(200, "text/plain", out);
+    });
+    httpd.on("/log", []() {
+      String out;
+      out.reserve(sizeof(logRing) + 16);
+      for (size_t i = 0; i < sizeof(logRing); i++) {
+        char c = logRing[(logHead + i) % sizeof(logRing)];
+        if (c) out += c;               // NULs = never-written slots, skip
+      }
+      httpd.send(200, "text/plain", out);
+    });
+    httpd.begin();
+    otaActive = true;
+    logLine("[ota] AP \"%s\" up at %s — IDE network port %s.local; "
+            "http://192.168.4.1/ and /log for diagnostics",
+            OTA_AP_SSID, WiFi.softAPIP().toString().c_str(), OTA_HOSTNAME);
+  } else {
+    httpd.stop();
+    ArduinoOTA.end();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    otaActive = false;
+    logLine("[ota] AP down, WiFi radio off");
+  }
+}
+
 // ---------- main loop ----------
 void loop() {
   uint32_t now = millis();
@@ -842,6 +994,15 @@ void loop() {
 
   while (Serial1.available()) gps.encode(Serial1.read());
   canPoll();
+
+  if (bleOtaMsg) {                      // 0x05: WiFi flashing mode toggle
+    bleOtaMsg = false;
+    otaSetMode(bleOtaOnB != 0);
+  }
+  if (otaActive) {
+    ArduinoOTA.handle();
+    httpd.handleClient();
+  }
 
   // buttons: edges were latched by the ISRs — just consume them here
   // button 1: click steps the screen, 3 s hold toggles auto-cycling
@@ -916,6 +1077,11 @@ void loop() {
     // the three are one consistent snapshot — the comparison they exist for is
     // meaningless if they come from different instants.
     lastAcc  = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
+    // Accumulate for the packet means. Every 100 Hz sample now reaches the
+    // app (as part of a mean) instead of 1 in 20 reaching it verbatim.
+    gyroSumX += lastGyro.x(); gyroSumY += lastGyro.y(); gyroSumZ += lastGyro.z();
+    accSumX  += lastAcc.x();  accSumY  += lastAcc.y();  accSumZ  += lastAcc.z();
+    imuWinN++;
     float g = lastLin.magnitude() / 9.80665f;
     if (g > maxG_g) maxG_g = g;
   }
@@ -923,10 +1089,25 @@ void loop() {
   // 5 Hz telemetry
   if (now - tTele >= 200) {
     tTele = now;
+    // Read the barometer here, at packet rate, not in the 1 Hz status block
+    // where it used to live. Slope is fitted over a 10 m window; at 30 km/h
+    // that window passes in just over a second, and a 1 Hz altitude gave it
+    // barely two distinct points to fit — the recording showed 0.99 altitude
+    // changes per second across 5 Hz samples, a staircase. The BMP280 is
+    // configured with 63 ms standby, so a fresh reading always exists.
+    // Altitude is computed from the pressure just read rather than via
+    // readAltitude(), which would issue a second I2C transaction for the
+    // same number.
+    if (bmpOk) {
+      lastPressPa = bmp.readPressure();
+      lastBaroAlt = 44330.0f * (1.0f - powf(lastPressPa / 101325.0f, 0.1903f));
+    }
     TelemetryPacket p = {};
     // 0x01 was the 50-byte pre-CAN packet; 0x02 added CAN but carried no gyro
-    // or calibration; 0x03 carried nothing the fusion hadn't already touched.
-    p.ver = 0x04;
+    // or calibration; 0x03 carried nothing the fusion hadn't already touched;
+    // 0x04 added the raw accelerometer; 0x05 keeps its exact layout but sends
+    // window means in the gyro/accel fields and reads the baro at 5 Hz.
+    p.ver = 0x05;
     p.flags = (fixValid() ? 1 : 0) | (gps.time.isValid() ? 2 : 0)
               | ((calAcc >= 3 || calRestored) ? 4 : 0);
     p.gpsTimeMs = gps.time.isValid()
@@ -952,18 +1133,30 @@ void loop() {
     p.linz_mg = (int16_t)(lastLin.z() / 9.80665f * 1000);
     p.maxG_mg = (int16_t)(maxG_g * 1000);
     p.marker = markerCount;
-    p.gyrx_d16 = (int16_t)(lastGyro.x() * 16);
-    p.gyry_d16 = (int16_t)(lastGyro.y() * 16);
-    p.gyrz_d16 = (int16_t)(lastGyro.z() * 16);
+    // Window means (ver 0x05). Falls back to the newest sample on the packet
+    // that races a boot — imuWinN can only be 0 before the first 10 ms tick.
+    double invN = imuWinN ? 1.0 / imuWinN : 0.0;
+    double mGx = imuWinN ? gyroSumX * invN : lastGyro.x();
+    double mGy = imuWinN ? gyroSumY * invN : lastGyro.y();
+    double mGz = imuWinN ? gyroSumZ * invN : lastGyro.z();
+    double mAx = imuWinN ? accSumX * invN : lastAcc.x();
+    double mAy = imuWinN ? accSumY * invN : lastAcc.y();
+    double mAz = imuWinN ? accSumZ * invN : lastAcc.z();
+    gyroSumX = gyroSumY = gyroSumZ = 0;
+    accSumX = accSumY = accSumZ = 0;
+    imuWinN = 0;
+    p.gyrx_d16 = (int16_t)(mGx * 16);
+    p.gyry_d16 = (int16_t)(mGy * 16);
+    p.gyrz_d16 = (int16_t)(mGz * 16);
     p.calib = (uint8_t)((calSys << 6) | (calGyro << 4) | (calAcc << 2) | calMag);
     p.zeroCount = zeroCount;
     // Raw accel in mg. ±16 g would overflow an int16 in mg, but the BNO055's
     // accelerometer runs at ±4 g in fusion mode and clips there itself, so the
     // range can't be reached. Clamped anyway: a wrapped sign on the one channel
     // that exists to be trusted is worse than a saturated one.
-    p.accx_mg = (int16_t)constrain(lastAcc.x() / 9.80665f * 1000, -32000, 32000);
-    p.accy_mg = (int16_t)constrain(lastAcc.y() / 9.80665f * 1000, -32000, 32000);
-    p.accz_mg = (int16_t)constrain(lastAcc.z() / 9.80665f * 1000, -32000, 32000);
+    p.accx_mg = (int16_t)constrain(mAx / 9.80665 * 1000, -32000, 32000);
+    p.accy_mg = (int16_t)constrain(mAy / 9.80665 * 1000, -32000, 32000);
+    p.accz_mg = (int16_t)constrain(mAz / 9.80665 * 1000, -32000, 32000);
     p.quatRejects = (uint16_t)min(quatRejects, 65535UL);
     maxG_g = 0;
 
@@ -997,14 +1190,12 @@ void loop() {
     if (bleServer->getConnectedCount() > 0) chTele->notify();
   }
 
-  // 1 Hz status + baro + debug
+  // 1 Hz status + baro temperature + debug. Pressure and altitude moved to
+  // the 5 Hz telemetry branch (ver 0x05) — temperature changes on weather
+  // timescales and stays here.
   if (now - tStatus >= 1000) {
     tStatus = now;
-    if (bmpOk) {
-      lastPressPa = bmp.readPressure();
-      lastTempC = bmp.readTemperature();
-      lastBaroAlt = bmp.readAltitude(1013.25f);
-    }
+    if (bmpOk) lastTempC = bmp.readTemperature();
     if (imuOk) {
       bno.getCalibration(&calSys, &calGyro, &calAcc, &calMag);
       // Persist once per boot, the first time the chip says it is there.
@@ -1038,6 +1229,7 @@ void loop() {
     s.temp_x10 = (int16_t)(lastTempC * 10);
     s.marker = markerCount;
     s.caps = BUILD_CAPS;                // tells the app this is the Full build
+    s.otaState = otaActive ? (uint8_t)(1 + WiFi.softAPgetStationNum()) : 0;
     chStat->setValue((uint8_t *)&s, sizeof(s));
     if (bleServer->getConnectedCount() > 0) chStat->notify();
     float dbgR, dbgP, dbgY;
@@ -1051,14 +1243,16 @@ void loop() {
     // sit near 0, and a steady non-zero reading is gyro bias, which is what
     // makes attitude wander. qrej counts non-unit quaternions dropped since
     // boot; a climbing number means the I2C run to the BNO055 is marginal.
-    Serial.printf("[dbg] fix=%d sats=%d view=%d conn=%d R=%+.1f P=%+.1f gz=%+.1f cal=%d%d%d qrej=%lu baro=%.1fm mark=%d btn=%d%d lps=%lu stall=%lu can=%s/%lu %u%% %.1fV\n",
-                  s.fix, s.sats, satsInView(), bleServer->getConnectedCount(),
-                  dbgR, dbgP, lastGyro.z(), calSys, calGyro, calAcc,
-                  (unsigned long)quatRejects, lastBaroAlt, markerCount,
-                  digitalRead(PIN_BUTTON), digitalRead(PIN_BUTTON2), loopsPerSec, maxLoopGapMs,
-                  canLive ? "live" : (canOk ? "idle" : "off"), (unsigned long)canS.frames,
-                  canLive ? canS.f401[0] : 0,
-                  canLive ? canU16(canS.f101, 0) / 10.0f : 0.0f);
+    // Through logLine, so the last ~8 KB of these are readable at /log
+    // whenever WiFi flashing mode is up — no USB cable needed.
+    logLine("[dbg] fix=%d sats=%d view=%d conn=%d R=%+.1f P=%+.1f gz=%+.1f cal=%d%d%d qrej=%lu baro=%.1fm mark=%d btn=%d%d lps=%lu stall=%lu can=%s/%lu %u%% %.1fV",
+            s.fix, s.sats, satsInView(), bleServer->getConnectedCount(),
+            dbgR, dbgP, lastGyro.z(), calSys, calGyro, calAcc,
+            (unsigned long)quatRejects, lastBaroAlt, markerCount,
+            digitalRead(PIN_BUTTON), digitalRead(PIN_BUTTON2), loopsPerSec, maxLoopGapMs,
+            canLive ? "live" : (canOk ? "idle" : "off"), (unsigned long)canS.frames,
+            canLive ? canS.f401[0] : 0,
+            canLive ? canU16(canS.f101, 0) / 10.0f : 0.0f);
     loopsPerSec = 0;
     maxLoopGapMs = 0;
   }
