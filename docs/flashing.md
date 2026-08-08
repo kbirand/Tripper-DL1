@@ -148,6 +148,11 @@ flashing mode is on — no arduino-cli, no espota, just a browser. (ArduinoOTA
 speaks espota, which only the Arduino tooling implements, which is why the
 laptop used to be mandatory.)
 
+The last build is also checked in at **`releases/tripper_light.ino.bin`** in
+the repo root, so you can grab it from GitHub on the phone directly and skip
+the compile entirely. Rebuild it with the command above whenever the firmware
+changes, and commit the new one in the same commit as the source.
+
 AirDrop `tripper_light.ino.bin` to the phone once — it lands in Files — then:
 
 1. Tripper app: **Settings → Tripper Puck → WiFi flashing mode** on.
