@@ -7,7 +7,7 @@
 //
 //   100 Hz  BNO055 quaternion + linear accel (IMUPLUS), latch interval max-g,
 //           gyro/raw-accel window sums (the packet sends the 200 ms mean)
-//   5 Hz    BLE telemetry notify (86-byte packed sample, same layout as Full)
+//   5 Hz    BLE telemetry notify (88-byte packed sample, same layout as Full)
 //           + BMP280 baro sample
 //   1 Hz    BLE status notify, baro temperature, serial debug line
 //   10 Hz   BLE raw notify — the 100 Hz IMU samples themselves, un-averaged,
@@ -15,7 +15,7 @@
 //   ~92/s   Talaria CAN frames, listen-only (SN65HVD230 on D8/D9)
 //
 // WIRE-COMPATIBLE WITH THE FULL BUILD ON PURPOSE. Identical service UUIDs,
-// identical 86-byte telemetry packet, identical 15-byte status packet, and the
+// identical 88-byte telemetry packet, identical 15-byte status packet, and the
 // same 148-byte raw batch. (This paragraph said 78 and 14 for months after the
 // packets grew — if you change a struct, change this line in the same commit.)
 // The app needs no branch: the GPS block simply arrives zeroed with both flags
@@ -126,9 +126,10 @@ static const char *RAW_UUID  = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70005";
 // ---------- packets (little-endian, packed) ----------
 // Byte-for-byte identical to tripper_puck.ino. Do not reorder either copy.
 struct __attribute__((packed)) TelemetryPacket {
-  uint8_t  ver;          // 0x05 — byte-identical layout to 0x04; the bump marks
-                         // a semantics change: gyr*/acc* below are 200 ms
-                         // window MEANS, not the newest 100 Hz sample
+  uint8_t  ver;          // 0x06 — 0x05 plus accDev_mg on the tail. 0x05 was
+                         // itself byte-identical to 0x04 and marked a semantics
+                         // change: gyr*/acc* below are 200 ms window MEANS, not
+                         // the newest 100 Hz sample
   uint8_t  flags;        // bit0 fix valid, bit1 time valid — both 0 in this
                          // build · bit2 IMU calibration usable
   uint32_t gpsTimeMs;    // always 0xFFFFFFFF here
@@ -198,8 +199,23 @@ struct __attribute__((packed)) TelemetryPacket {
   // since the first build and never recorded; a count that climbs mid-ride
   // means the attitude is being *held* across glitched I2C reads, not tracking.
   uint16_t quatRejects;
+  // ---- accelerometer window PEAK (ver 0x06) --------------------------------
+  // Largest |‖a‖ − 1 g| seen at 100 Hz across the window, in mg. The app's
+  // estimator refuses to take its "down" reference from the accelerometer
+  // while the magnitude is far from 1 g — braking bumps and drops point it
+  // somewhere that isn't down. That test was being applied to the window MEAN,
+  // which is the one number that cannot show it: the 100 Hz flight recorder
+  // (2026-08-09 rides) measured |a| outside 0.8–1.2 g on 17–20% of moving
+  // samples while the means were outside on 0.6–1.3%. The gate had been tuned
+  // against a signal already smoothed into compliance, so it almost never
+  // fired. A mean cannot be un-averaged; the peak has to be taken here.
+  //
+  // NOT the same as maxG_mg above, which latches the peak of the fusion's
+  // LINEAR acceleration — a product of the very fusion this channel exists to
+  // cross-check. This is the raw accelerometer, gravity included, untouched.
+  uint16_t accDev_mg;
 };
-static_assert(sizeof(TelemetryPacket) == 86, "telemetry packet size drifted");
+static_assert(sizeof(TelemetryPacket) == 88, "telemetry packet size drifted");
 
 struct __attribute__((packed)) StatusPacket {
   uint8_t  ver;          // 0x01
@@ -299,6 +315,9 @@ imu::Vector<3> lastAcc;                 // sensor frame, m/s² — RAW, pre-fusi
 double gyroSumX = 0, gyroSumY = 0, gyroSumZ = 0;
 double accSumX = 0, accSumY = 0, accSumZ = 0;
 uint16_t imuWinN = 0;                   // samples in the sums (~20 per packet)
+// Window PEAK of |‖a‖ − 1 g| in g, latched at 100 Hz and reset each packet.
+// The one thing about the window a mean is structurally unable to report.
+double accDevMax = 0;
 // BNO055 calibration, refreshed at 1 Hz. IMUPLUS has no magnetometer, so the
 // accelerometer is the only thing that knows where down is: calAcc is what
 // decides whether a mount zero means anything, and calMag stays 0 forever.
@@ -774,6 +793,10 @@ void loop() {
     gyroSumX += lastGyro.x(); gyroSumY += lastGyro.y(); gyroSumZ += lastGyro.z();
     accSumX  += lastAcc.x();  accSumY  += lastAcc.y();  accSumZ  += lastAcc.z();
     imuWinN++;
+    // Peak departure from 1 g over the window — see accDev_mg. Latched from the
+    // same snapshot as the sums, so the mean and its peak describe one window.
+    double accDev = fabs(lastAcc.magnitude() / 9.80665 - 1.0);
+    if (accDev > accDevMax) accDevMax = accDev;
     float g = lastLin.magnitude() / 9.80665f;
     if (g > maxG_g) maxG_g = g;
 
@@ -843,7 +866,7 @@ void loop() {
       lastBaroAlt = 44330.0f * (1.0f - powf(lastPressPa / 101325.0f, 0.1903f));
     }
     TelemetryPacket p = {};
-    p.ver = 0x05;                       // 0x04 layout; window-mean gyro/accel
+    p.ver = 0x06;                       // 0x05 + the accelerometer window peak
     // No GPS in this build. flags stays 0 and the position block stays zeroed,
     // which is the same state the Full build reports before it gets a fix — so
     // the app's existing gating covers this without a special case.
@@ -887,6 +910,9 @@ void loop() {
     p.accy_mg = (int16_t)constrain(mAy / 9.80665 * 1000, -32000, 32000);
     p.accz_mg = (int16_t)constrain(mAz / 9.80665 * 1000, -32000, 32000);
     p.quatRejects = (uint16_t)min(quatRejects, 65535UL);
+    // Saturates at 65 g of departure, which the ±4 g sensor cannot reach.
+    p.accDev_mg = (uint16_t)constrain(accDevMax * 1000.0, 0, 65535);
+    accDevMax = 0;
     maxG_g = 0;
 
     // Bike CAN. The whole block stays zero unless a frame arrived recently, so

@@ -341,7 +341,7 @@ Arduino sketches in [`hardware/firmware/`](hardware/firmware/):
 
 | Sketch | Purpose |
 |---|---|
-| [`tripper_light`](hardware/firmware/tripper_light/) | **Light-build firmware** — IMU + baro + CAN → BLE. No GPS/OLED/button code at all; marker and mount-zero arrive as control writes. Same UUIDs and same 86-byte packet as the Full build |
+| [`tripper_light`](hardware/firmware/tripper_light/) | **Light-build firmware** — IMU + baro + CAN → BLE. No GPS/OLED/button code at all; marker and mount-zero arrive as control writes. Same UUIDs and same 88-byte packet as the Full build |
 | [`tripper_puck`](hardware/firmware/tripper_puck/) | **Full-build firmware** — sensors + GPS → BLE + OLED |
 | [`bench_imu_can`](hardware/firmware/bench_imu_can/) | Bring-up rig for a half-built puck — IMU + baro + CAN only, no OLED/buttons/GPS. Talks to the BNO055 registers directly (a library `begin()` can't tell a phantom ACK from a chip), counts every failed read, and re-probes missing sensors every 3 s so a wire soldered mid-run comes up on its own. Same BLE UUIDs and packets as production |
 | [`i2c_gate`](hardware/firmware/i2c_gate/) | BNO055 clock-stretch stress test (the go/no-go gate) |
@@ -427,7 +427,7 @@ Device name `Tripper-DL1`. One service, four characteristics:
 | UUID | Char | Direction |
 |---|---|---|
 | `8E7C1A20-0F5A-4B9C-9C90-54B1D2A70001` | *service* | |
-| `…0002` | telemetry | notify + read, 5 Hz, 86 B |
+| `…0002` | telemetry | notify + read, 5 Hz, 88 B |
 | `…0003` | status | notify + read, 1 Hz, 15 B |
 | `…0004` | control | write / write-no-response |
 | `…0005` | raw | notify, 10 Hz, 148 B — the un-averaged 100 Hz IMU stream |
@@ -469,6 +469,7 @@ Device name `Tripper-DL1`. One service, four characteristics:
 | 77 | u8 | zeroCount | mount zeros the puck has **accepted** since boot |
 | 78 | i16×3 | acc x y z | **raw** accelerometer, mg (sensor frame) — gravity included, pre-fusion. **`0x05`: window mean**, as `gyr` |
 | 84 | u16 | quatRejects | non-unit `getQuat()` reads dropped since boot, saturating |
+| 86 | u16 | accDev_mg | **`0x06`:** largest \|‖a‖ − 1 g\| seen at 100 Hz inside this window, mg — the peak the `acc` mean cannot show |
 
 Bytes 50–69 are the bike's CAN bus, read listen-only from a SN65HVD230 on
 D8/D9 (see [Bike CAN bus](#bike-can-bus-talaria)). **The whole block is zeroed
@@ -512,6 +513,21 @@ and "is the chip fed bad data, or mishandling good data" becomes answerable
 from a recording. `quatRejects` should stay flat; a count that climbs mid-ride
 means the attitude is being *held* across glitched I2C reads rather than
 tracking the bike.
+
+**Why `0x06` adds a peak beside the mean.** Averaging is what makes `acc`
+usable as a direction, and it is also what makes it useless as a *warning*.
+The app's estimator only takes its "down" reference from the accelerometer
+while `‖a‖` is near 1 g — braking bumps and drops point it somewhere that
+isn't down — but it was applying that test to the window mean, which is the
+one number that cannot reveal a jolt inside its own window. The 100 Hz flight
+recorder settled it on the 2026-08-09 rides: the real `‖a‖` was outside
+0.8–1.2 g on **17–20% of moving samples**, while the means were outside on
+**0.6–1.3%**. The gate had been tuned against a signal already smoothed into
+compliance and was passing almost everything it exists to refuse. A mean
+cannot be un-averaged, so the peak is taken here, where the samples are.
+
+Note this is *not* `maxG_mg`, which latches the peak of the fusion's linear
+acceleration — a product of the very fusion `acc` exists to cross-check.
 
 **Why `0x05` averages.** Through `0x04` these two fields carried whichever
 100 Hz sample happened to land when the packet was built — 1 in 20 reached the
