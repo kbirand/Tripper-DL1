@@ -17,9 +17,16 @@ Scoring:
     SLOPE — correlation / bias / sd against the attitude-free barometric grade
             (baro altitude over CAN distance), the reference the July
             investigation validated at +0.75 vs GPS.
-Conventions established on Tripper_20260807_232541:
-    kinematic lean sign +1 matches the rollDegrees convention (15/15 corners);
-    roll-rate for integration is -puckGyroX in that same convention.
+LEAN IS RIGHT-POSITIVE. Re-anchored on the two 2026-08-09 rides after the app
+flipped on 2026-08-08; this file scored against the OLD left-positive
+reference until 2026-08-09 and therefore marked the corrected app 0/27 on a
+ride where it was right. Each sign was settled against the shipped
+rollDegrees on both rides, not from any doc:
+    kinematic reference  atan(-v*psi_dot/g)  -> kinematic_lean(-1)  +0.94/+0.95
+    roll rate            +puckGyroX                                 +0.93/+0.92
+    accel roll           atan2(ay, az)  (already right-positive)     +0.98/+0.99
+Recordings made before 2026-08-08 carry lean MIRRORED and cannot be scored
+here without flipping them first.
 """
 import argparse
 import numpy as np
@@ -33,15 +40,15 @@ from triplib import Ride, G
 
 def lean_kinematic_raw(r, **kw):
     """Pure kinematic reference atan(v*psi_dot/g), no smoothing."""
-    return r.kinematic_lean(+1)
+    return r.kinematic_lean(-1)
 
 
 def lean_complementary(r, tau=1.5, **kw):
     """Gyro-integrated roll pulled toward the kinematic reference with time
     constant tau — the filter the July doc validated offline (10/12 corners).
-    Roll rate is -gyroX (forward axis) in the rollDegrees sign convention."""
-    kin = r.kinematic_lean(+1)
-    rate = -r.gx  # deg/s
+    Roll rate is +gyroX (forward axis) in the right-positive convention."""
+    kin = r.kinematic_lean(-1)
+    rate = +r.gx  # deg/s
     a = r.dt / (tau + r.dt)
     out = np.zeros(len(kin))
     for i in range(1, len(kin)):
@@ -54,10 +61,10 @@ def lean_complementary(r, tau=1.5, **kw):
 def lean_complementary_speedgate(r, tau=1.5, **kw):
     """Same, but below 3 km/h the reference becomes the raw-accel roll
     (gravity is trustworthy at standstill, kinematic reference is not)."""
-    kin = r.kinematic_lean(+1)
+    kin = r.kinematic_lean(-1)
     acc_roll, _ = r.accel_roll_pitch(tau=1.0)
     ref_arr = np.where(r.v > 3.0, kin, acc_roll)
-    rate = -r.gx
+    rate = +r.gx
     a = r.dt / (tau + r.dt)
     out = np.zeros(len(kin))
     for i in range(1, len(kin)):
@@ -144,7 +151,7 @@ def main():
     print(f"packet v{int(np.nanmax(pv)) if np.isfinite(pv).any() else '?'}, "
           f"raw accel {'present' if has_raw else 'MISSING (pre-v0x04 ride)'}\n")
 
-    kin = r.kinematic_lean(+1)
+    kin = r.kinematic_lean(-1)
     corners = r.corners()
     straight = r.straight_mask()
     baro_ref = r.baro_slope()
