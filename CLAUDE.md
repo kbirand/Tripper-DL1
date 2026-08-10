@@ -114,6 +114,28 @@ is held the bike has two disagreeing instruments and the app is the honest one
 (its mode comes from `0x202`). Pressing the handlebar button releases the
 override AND realigns the display, so the disagreement cannot get stuck.
 
+**Standing in for the dash (2026-08-10).** Unplugging the bike's dash removes
+FIVE frames — `0x490`, `0x402` (odometer), `0x303` (speed), `0x304`, `0x403` —
+while every controller and BMS frame keeps coming. Proven by unplugging it and
+diffing the ID list, which also corrected two more DBC sender attributions.
+Consequences, all now handled in firmware: the reactive reply has nothing to
+answer so the puck free-runs `0x490` at 5 Hz once no dash frame has arrived for
+a second (and in that state there is nobody to fight, so the power-ceiling
+modulation cannot happen); speed is derived from `0x203` RPM; the odometer is
+counted by the puck and kept in flash, auto-seeded by mirroring `0x402` whenever
+the dash IS present. `canFlags` bit7 marks the dash absent so the app can tell
+measurement from inference.
+
+**Speed from RPM: the ratio is not a constant, and 5.887 was wrong.** It stood
+in the DBC and both READMEs and is out by ~12x — it would put 120 km/h on the
+screen of a bike doing 10. Measured against the two bundled rides: **71.0 rpm
+per km/h** with the bike's gear ratio set correctly to 1:8.4, and 64.6 with it
+mis-set to 1:7.5. That difference IS the finding — the number follows the
+configured gearing, which is why wheel size and gear ratio are app settings
+rather than firmware constants. `km/h = rpm / gearRatio * circumference_m *
+0.06`, and `8.4 * 16.667 / 1.971 = 71.0` back-solves the loaded rolling
+circumference to 1.971 m.
+
 **Regen is commandable but unverifiable.** It moves nothing else on the bus, the
 dash never listens so its display cannot confirm it, and regen current is
 unmeasurable because `0x203` power and `0x302` current are both unsigned. The

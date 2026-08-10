@@ -72,6 +72,11 @@ or in-line.
 
 ## Bike control: mode works on the bike, regen is unverified
 
+**Status (2026-08-10, end of day):** mode control and derived speed both work
+**flawlessly on a dash-less bike** — rider-confirmed. The two-commander fight
+cannot occur in that configuration because there is no second commander.
+Original status follows.
+
 **Status:** **mode control works on the bike.** Built, flashed over WiFi and
 confirmed 2026-08-10 with the bike on a stand: the app sets the mode and the
 machine obeys. Regen is built and shipped alongside it but is **still
@@ -85,6 +90,51 @@ overridden value. Measured on the bike over ~1000 transmits: `tx` climbs by
 exactly 5/s (one reply per dash frame, no waste), `txerr=0`, `boff=0`, driver
 never leaving `run`. `rxerr` blips to 4–5 and self-clears, which is what two
 nodes sharing an arbitration ID look like.
+
+### SAFETY: a held override modulates the power ceiling at 5 Hz
+
+**Do not ride with a mode override held until this is resolved.** Reported from
+the bike 2026-08-10: with the handlebar in Sport and the app holding Eco, the
+bike made abnormal noises around 44 km/h.
+
+The cause is structural, not a coding mistake. The handlebar unit commands
+`0x490` five times a second and the puck can only answer *after* hearing it, so
+for the ~2 ms between the two the controller's most recent instruction is the
+handlebar's. Ride mode is a POWER CEILING — `0x202`'s demand field reads 1100 in
+Sport and 750 in Eco — so those 2 ms are not a cosmetic disagreement: they are
+the motor's current limit jumping between the two values, five times a second.
+
+It only shows where the rider is actually pressing against the lower ceiling —
+at the Eco speed cap, and under hard acceleration at any speed. Gentle riding
+never reaches the ceiling and feels nothing, which is why the bench tests missed
+it entirely.
+
+Direction decides the character: app-Eco against handlebar-Sport blips the
+ceiling UP (surges), app-Sport against handlebar-Eco blips it DOWN (stumbles
+under load, probably the worse of the two).
+
+**The "297/297 frames, zero flicker" measurement did not disprove this and never
+could.** It sampled `0x202` at 10 Hz; a 2 ms excursion is invisible at that rate.
+It proved the override dominates, not that the command stream is clean. A
+summary statistic hid exactly the event a gate on it was meant to catch — the
+same lesson `accDev_mg` exists to teach.
+
+Before redesigning, run the control test: set Eco from the handlebar with NO
+override active and roll the throttle on hard. Same noise means this is the
+bike's own behaviour at its Eco ceiling and the fight is innocent.
+
+If the fight is the cause, in order of preference:
+
+1. **Answer from an interrupt instead of the main loop.** Reply latency is
+   currently up to ~2 ms because `canPoll()` runs in `loop()` at ~450 Hz.
+   An ISR-driven reply could cut that ~10x. A 0.2 ms excursion may be too short
+   for the controller's current loop to act on. Cannot reach zero — try it and
+   measure, do not assume.
+2. Gate mode override to standstill. Safe, and nearly useless: the override
+   would drop the moment the bike moves.
+3. Keep it with a documented limit — never hold a contested mode against the
+   ceiling.
+4. Withdraw mode override and keep the odometer and telemetry work.
 
 ### The bike's display cannot be made to agree — this is permanent
 
@@ -131,11 +181,20 @@ so the rear mechanical brake does not mask the rear motor's regen.
 
 What is genuinely left for a ride, once the bench test above has run:
 
-1. **Odometer** — currently **provisional**. It rests on a single static match:
-   the bike's display read 400 km and `0x402[2:4]` read exactly 400. This bus
-   carries round constants (1200 sits in both `0x101[4:6]` and `0x302[6:8]`),
-   so one match against a round number is suggestive, not proof. 1–2 km of
-   riding must move the field.
+1. **Odometer — `0x402` is STILL provisional**, and the 2026-08-10 dash-less
+   test did not settle it, though it looked at first as though it had. What was
+   confirmed is the puck's side: it auto-seeded 400 from `0x402` while the dash
+   was connected, then counted to 401 by integrating its own distance with the
+   dash unplugged, and the app marked it `~401` correctly. None of that is
+   evidence about `0x402` itself — the seed captured one static value, which is
+   exactly the single match we already had. `0x402` has still never been WATCHED
+   to increment.
+   The check that settles it: ride 1-2 km with the dash CONNECTED, then read
+   `0x402` and the dash's own display. Both should have moved off 400 together.
+   Note the two counters have already diverged — the puck is at 401 and the
+   bike's dash is still at 400, because the dash was not present to count that
+   kilometre. The puck's reading is deliberately monotonic and will not walk
+   backwards when the dash returns behind it.
 2. **Regen under load** — only worth doing *after* the bench spin-down has
    shown the controller honours an injected level. The bench answers whether
    the command lands; a road coast-down at regen 1 versus 4 answers whether it

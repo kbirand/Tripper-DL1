@@ -61,7 +61,7 @@ BO_ 770 BMS_Power: 8 BMS
    SG_ PackVoltage_Coarse : 0|8@1+ (1,0) [0|100] "V" Dash
    SG_ Current : 32|16@1+ (0.1,0) [0|150] "A" Dash
 
-BO_ 771 VehicleSpeed: 8 MotorController
+BO_ 771 VehicleSpeed: 8 Dash
    SG_ Speed : 0|16@1+ (0.1,0) [0|100] "km/h" Dash
 
 BO_ 1025 BMS_Status: 8 BMS
@@ -70,7 +70,7 @@ BO_ 1025 BMS_Status: 8 BMS
    SG_ Unknown_2 : 16|8@1+ (1,0) [0|255] "" Dash
    SG_ Unknown_3 : 24|8@1+ (1,0) [0|255] "" Dash
 
-BO_ 1026 Odometer: 8 Unknown
+BO_ 1026 Odometer: 8 Dash
    SG_ Odometer_km : 16|16@1+ (1,0) [0|65535] "km" Dash
    SG_ Unknown_6 : 48|16@1+ (1,0) [0|65535] "" Dash
 
@@ -81,12 +81,12 @@ BO_ 1168 ModeCommand: 8 Dash
 
 CM_ BO_ 257 "Pack voltage at 0.1 V resolution. Cross-checked against the sum of the 16 cell voltages in 0x201.";
 CM_ BO_ 513 "Reports only the pack's highest and lowest cell, not a round-robin of all 16 - bytes 0-1 exceed bytes 2-3 in 100% of 18447 logged frames, and a parked bike holds the same two indices indefinitely. The individual 16 cells are therefore never all observable. CellHigh + CellLow averaged and multiplied by 16 reproduces 0x101 PackVoltage to within 0.02 V.";
-CM_ BO_ 515 "MotorRPM and Speed (0x303) correlate at r=0.999 with a fixed ratio of 5.887 across two independent ride logs.";
+CM_ BO_ 515 "MotorRPM is the only speed-bearing signal that survives the dash being unplugged, and it is how a dash-less bike recovers speed. Do NOT use the "5.887" that stood in this comment until 2026-08-10: it is wrong by about 12x and would put 120 km/h on the screen of a bike doing 10. Measured against the two bundled ride logs, rpm per km/h is 71.0 on the ride whose gear ratio was set correctly to 1:8.4 and 64.6 on the one mis-set to 1:7.5 - which is itself the proof that this is not a constant of nature but a function of the CONFIGURED gearing and the tyre. The relation is km/h = rpm / gearRatio * circumference_m * 0.06; 8.4 * 16.667 / 1.971 = 71.0 closes it and back-solves the loaded rolling circumference to 1.971 m, between the 2.019 m nominal for an 80/100-19 and the ~1.93 m measured against GPS. r=0.999 within a single ride.";
 CM_ SG_ 515 Power "Peak 5740 W vs peak V*I of 5923 W computed from 0x101 voltage and 0x302 current - agrees to ~3%.";
 CM_ SG_ 770 Current "0.1 A units, peaks near 102 A.";
-CM_ SG_ 771 Speed "0.1 km/h. Integrating over ride_2 gives 8.93 km in 27.2 min (19.7 km/h average); over ride_1, 3.05 km in 8.3 min.";
+CM_ SG_ 771 Speed "Sent by the DASH, not the motor controller - it was attributed to the controller until 2026-08-10, when unplugging the dash made this frame disappear along with 0x304, 0x402, 0x403 and 0x490 while every controller and BMS frame kept coming. Unplugging a node and diffing the ID list is about as direct as sender attribution gets. Consequence for anyone replacing the dash: speed leaves the bus with it, though 0x203 MotorRPM survives and tracks it at a fixed 5.887 ratio, so it is recoverable by computation. 0.1 km/h. Integrating over ride_2 gives 8.93 km in 27.2 min (19.7 km/h average); over ride_1, 3.05 km in 8.3 min.";
 CM_ SG_ 1025 StateOfCharge "Reads exactly 100 for all of ride_1 and steps monotonically 86 -> 75 across ride_2.";
-CM_ BO_ 1026 "The bike's odometer, and a standing correction to 'there is no odometer on this bus at all' - a claim that stood in two READMEs and was drawn entirely from the 8 frames the puck captures while the bus carries 15. 0x402 was one of the seven nobody had decoded. Identified 2026-08-10 by reading the number off the bike's own display (400 km) and finding it in a full-bus capture: 0x402[2:4] read exactly 400. Sender unverified - it is attributed to Unknown rather than guessed at, since nothing in the capture distinguishes which node emits it. PROVISIONAL: this bus carries round constants (1200 appears in both 0x101[4:6] and 0x302[6:8]), so one static match against a round number is suggestive, not proof. Riding 1-2 km and watching it increment is what settles it. Read as u16 rather than the u32 that bytes 2:6 would allow - bytes 4:5 are zero on a stationary bike, but a narrow read is only wrong past 65535 km while a wide one corrupts the moment those bytes belong to something else.";
+CM_ BO_ 1026 "Sent by the DASH - confirmed 2026-08-10 by unplugging it, at which point this frame vanished along with 0x303, 0x304, 0x403 and 0x490. That is where an odometer belongs: in the instrument cluster that displays it. It also means the odometer LEAVES THE BUS with the dash, so a puck acting as a replacement display cannot report one - the number lives in the cluster, not in the drivetrain. The bike's odometer, and a standing correction to 'there is no odometer on this bus at all' - a claim that stood in two READMEs and was drawn entirely from the 8 frames the puck captures while the bus carries 15. 0x402 was one of the seven nobody had decoded. Identified 2026-08-10 by reading the number off the bike's own display (400 km) and finding it in a full-bus capture: 0x402[2:4] read exactly 400. PROVISIONAL: this bus carries round constants (1200 appears in both 0x101[4:6] and 0x302[6:8]), so one static match against a round number is suggestive, not proof. Riding 1-2 km and watching it increment is what settles it. Read as u16 rather than the u32 that bytes 2:6 would allow - bytes 4:5 are zero on a stationary bike, but a narrow read is only wrong past 65535 km while a wide one corrupts the moment those bytes belong to something else.";
 CM_ SG_ 1026 Unknown_6 "Unidentified, and it MOVES: 3634 in one capture on 2026-08-10 and 0 in another about an hour later, with the odometer at 400 km in both and the bike stationary throughout. Not a finer-resolution distance - it fell to zero while distance cannot. Bytes 4:5 stayed zero across every capture, which is what makes the u16 odometer read at 2:4 safe.";
 CM_ BO_ 514 "Sent by the motor controller, not the dash - it was attributed to the dash until 2026-08-10. It carries Kickstand and Standstill, which are the controller's own sensors, and its mode bits and Demand floor FOLLOW 0x490 by 20-27 ms rather than leading it. The 2026-08-10 injection test is decisive: with an injected 0x490 commanding Eco while the dash still commanded Sport, this frame reported Eco - so it cannot be the same node that sends 0x490. See the comment on 1168.";
 CM_ SG_ 514 FreeCounter "12-bit free-running counter. NOT an odometer - it accumulates while stopped and its counts/km differ by 34% between rides.";

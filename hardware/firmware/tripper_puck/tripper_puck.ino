@@ -131,6 +131,10 @@ void logLine(const char *fmt, ...) {
 #define CAN_TX_GPIO  GPIO_NUM_7   // D8 -> SN65HVD230 CTX
 #define CAN_RX_GPIO  GPIO_NUM_8   // D9 <- SN65HVD230 CRX
 #define CAN_STALE_MS 2000UL       // no frame for this long = bus considered dead
+// No 0x490 for this long means the dash is not on the bus at all — five
+// missed frames at its 5 Hz rate. Long enough that a dropped frame or two
+// never flips the puck into free-running against a dash that is still there.
+#define DASH_GONE_MS 1000UL
 #define TZ_HOURS     3         // display offset for the clock screen (TRT, no DST)
 #define CLICK_MAX_MS 600       // release under this = a click, not a hold
 #define ZERO_SHOW_MS 800       // held past this = show the zero progress bar
@@ -445,6 +449,20 @@ volatile uint8_t ovrRegen = 0;          // 1..4
 static uint8_t   dashB0 = 0;            // the dash's own 0x490[0], last seen
 static bool      dashSeen = false;
 static uint32_t  canTxOk = 0, canTxFail = 0, canBusOff = 0;
+static uint32_t  lastDash490Ms = 0;   // when the dash last commanded
+static uint32_t  lastSelfTxMs = 0;    // when we last free-ran one
+static uint32_t  lastOdoMs = 0;       // last odometer integration tick
+static uint32_t odoKm = 0;        // whole km — the bike's while the dash is on
+static float    odoMetres = 0;    // metres accumulated since the last whole km
+static uint32_t odoSavedKm = 0;   // what is currently in flash
+// Drivetrain, overridable over BLE (0x0A) and kept in flash.
+#define GEAR_RATIO_DEFAULT   8.4f
+#define WHEEL_CIRC_M_DEFAULT 1.971f
+static uint16_t cfgGearX100 = (uint16_t)(GEAR_RATIO_DEFAULT * 100);
+static uint16_t cfgCircMm   = (uint16_t)(WHEEL_CIRC_M_DEFAULT * 1000);
+
+// The dash counts as present only while its 0x490 keeps arriving.
+bool dashOnBus() { return lastDash490Ms && millis() - lastDash490Ms <= DASH_GONE_MS; }
 // Which connection asked for the override. Now that the puck accepts more than
 // one client, "a phone disconnected" is not the same as "the phone that is
 // driving the bike disconnected" — clearing on any disconnect would let one app
@@ -735,6 +753,7 @@ class CtrlCB : public NimBLECharacteristicCallbacks {
           uint8_t m = v.data()[1];
           ovrMode = (m == 1 || m == 2) ? m : 0;
           ovrOwner = ovrMode || ovrRegen ? info.getConnHandle() : BLE_HS_CONN_HANDLE_NONE;
+          prefs.putUChar("ovrMode", ovrMode);
           logLine("[ble] mode override %u", ovrMode);
         }
         break;
@@ -745,11 +764,43 @@ class CtrlCB : public NimBLECharacteristicCallbacks {
       // confirm it, and regen current is unmeasurable because 0x203 power and
       // 0x302 current are both unsigned. The bike also inhibits regen above
       // ~90% state of charge, so on a full pack this correctly does nothing.
+      // 0x0A + [gearx100 u16][circ_mm u16]: the bike's drivetrain. Speed is
+      // derived here and the odometer integrated from it, so this is the only
+      // place a wrong wheel or sprocket can actually be corrected — an app-side
+      // setting can fix its own display and never the odometer.
+      case 0x0A:
+        if (v.size() >= 5) {
+          uint16_t g = (uint16_t)v.data()[1] | ((uint16_t)v.data()[2] << 8);
+          uint16_t c = (uint16_t)v.data()[3] | ((uint16_t)v.data()[4] << 8);
+          // Reject nonsense rather than let a bad write poison the odometer:
+          // 1:1..1:25, and 0.5..3.5 m of circumference.
+          if (g >= 100 && g <= 2500 && c >= 500 && c <= 3500) {
+            cfgGearX100 = g;
+            cfgCircMm = c;
+            prefs.putUShort("gearX100", g);
+            prefs.putUShort("circMm", c);
+            logLine("[ble] drivetrain 1:%.2f, %u mm", g / 100.0f, c);
+          }
+        }
+        break;
+      // 0x09 + [km u32]: seed the puck's own odometer. Only needed on a bike
+      // whose dash is gone for good — while the dash is present its 0x402 is
+      // the authority and overwrites this on the next frame.
+      case 0x09:
+        if (v.size() >= 5) {
+          odoKm = odoSavedKm = (uint32_t)v.data()[1] | ((uint32_t)v.data()[2] << 8)
+                             | ((uint32_t)v.data()[3] << 16) | ((uint32_t)v.data()[4] << 24);
+          odoMetres = 0;
+          prefs.putUInt("odoKm", odoKm);
+          logLine("[ble] odometer seeded to %lu km", (unsigned long)odoKm);
+        }
+        break;
       case 0x08:
         if (v.size() >= 2) {
           uint8_t r = v.data()[1];
           ovrRegen = (r >= 1 && r <= 4) ? r : 0;
           ovrOwner = ovrMode || ovrRegen ? info.getConnHandle() : BLE_HS_CONN_HANDLE_NONE;
+          prefs.putUChar("ovrRegen", ovrRegen);
           logLine("[ble] regen override %u", ovrRegen);
         }
         break;
@@ -986,6 +1037,106 @@ bool canBringup() {
   return true;
 }
 
+// Put one 0x490 on the bus. Zero timeout: a full TX queue means the bus is
+// unhealthy, and blocking here would stall the 100 Hz IMU sampler that
+// everything else depends on.
+void canSend490(uint8_t b0, uint8_t b1) {
+  twai_message_t t = {};
+  t.identifier = 0x490;
+  t.data_length_code = 8;
+  t.data[0] = b0;
+  t.data[1] = b1;                       // 0x60 on every frame the dash ever sent
+  if (twai_transmit(&t, 0) == ESP_OK) canTxOk++; else canTxFail++;
+}
+
+// The dash is gone: send our own 0x490 on a timer instead of replying to one.
+//
+// Reactive replies are right ONLY while the dash is there to reply to. With the
+// dash unplugged the puck went completely silent — tx=0 — because nothing ever
+// triggered it, which is exactly what a rider testing a dash-less bike sees as
+// "the app cannot change the mode". Here there is nobody to out-shout, so a
+// plain 5 Hz broadcast is both sufficient and free of the 2 ms contested window
+// that makes a held override modulate the power ceiling.
+//
+// Both fields must be supplied because there is no dash frame to inherit the
+// other half from: an un-overridden mode follows what the controller reports in
+// 0x202, and an un-overridden regen falls back to the last level the dash asked
+// for before it was unplugged, or 1.
+void canFreeRun() {
+  uint8_t mode = ovrMode ? ovrMode : (uint8_t)((canS.f202[0] >> 4) & 3);
+  uint8_t regen = ovrRegen ? ovrRegen : (uint8_t)(dashSeen ? (dashB0 & 7) : 1);
+  if (mode == 0) return;                // controller has not told us a mode yet
+  if (regen < 1 || regen > 4) regen = 1;
+  canSend490((uint8_t)((mode & 7) << 3 | (regen & 7)), 0x60);
+}
+
+// ---------- standing in for the dash (ver 0x07, 2026-08-10) ----------
+// Unplugging the dash takes FIVE frames off the bus with it: 0x490 (mode/regen
+// command), 0x303 (speed), 0x402 (odometer), 0x304 and 0x403. Proven by
+// unplugging it and diffing the ID list — every controller and BMS frame kept
+// coming, those five stopped. Two of them are things the app has to show, so
+// the puck synthesises them when the dash is absent.
+//
+// SPEED. 0x203 MotorRPM survives, so speed is recoverable from it:
+//
+//     km/h = rpm / gearRatio * circumference_m * 0.06
+//
+// Do NOT use the 5.887 figure that was in talaria.dbc — it is wrong by about
+// 12x and would have put 120 km/h on the screen of a bike doing 10. Measured
+// against the two bundled ride logs: 71.0 rpm per km/h on the ride whose gear
+// ratio was set correctly (1:8.4), and 64.6 on the one mis-set to 1:7.5, which
+// is itself the proof that the number tracks the CONFIGURED ratio rather than
+// being a constant of nature. 8.4 * 16.667 / 1.971 = 71.0 closes the loop and
+// back-solves the loaded rolling circumference to 1.971 m — between the 2.019 m
+// nominal for an 80/100-19 and the ~1.93 m loaded figure in CLAUDE.md.
+//
+// These are only the defaults. Every bike has different gearing and tyres,
+// which is why the app carries wheel-size and gear-ratio settings and computes
+// its own speed from canRpm; this exists so the packet's speed field is sane
+// for any other consumer rather than zero.
+// Defaults only — the rider's own gearing and tyre arrive over BLE (0x0A)
+// and are kept in flash. Hardcoding these was always a placeholder: the
+// odometer is integrated HERE, so a bike with different gearing could
+// never have been corrected app-side. See cfgGearX100 / cfgCircMm.
+
+
+// The bike's own speed when the dash provides it, otherwise derived from motor
+// RPM. Returns 0.1 km/h to match the wire field either way.
+uint16_t canSpeedDkph() {
+  uint16_t fromDash = canU16(canS.f303, 0);
+  if (fromDash) return fromDash;
+  if (millis() - lastDash490Ms <= DASH_GONE_MS && lastDash490Ms) return fromDash;
+  uint16_t rpm = canU16(canS.f203, 0);
+  float kmh = (rpm / (cfgGearX100 / 100.0f)) * (cfgCircMm / 1000.0f) * 0.06f;
+  return (uint16_t)(kmh * 10.0f + 0.5f);
+}
+
+// ODOMETER. The bike's odometer lives in the dash and leaves with it — third
+// party displays start from zero for exactly this reason, because there is
+// nothing on the bus to seed them from.
+//
+// So: mirror 0x402 whenever the dash is there, which auto-seeds us with the
+// real reading and needs no configuration, and integrate our own distance when
+// it is not. Persisted on each whole kilometre, which bounds both flash wear
+// and the loss from a power cut to under 1 km.
+void odoUpdate(uint16_t speed_dkph, uint32_t dtMs) {
+  uint32_t fromDash = canU16(canS.f402, 2);
+  if (fromDash) {
+    // Adopt the dash's reading only when it is AHEAD of ours. It is the
+    // authority on a stock bike, but once the puck has counted kilometres the
+    // dash never saw — every dash-less ride — the dash is behind, and mirroring
+    // it blindly would walk the odometer backwards. Odometers do not do that.
+    if (fromDash > odoKm) { odoKm = fromDash; odoMetres = 0; }
+  } else {
+    odoMetres += (speed_dkph / 10.0f) * (dtMs / 3600.0f);   // km/h * h -> km*1000
+    while (odoMetres >= 1000.0f) { odoMetres -= 1000.0f; odoKm++; }
+  }
+  if (odoKm != odoSavedKm) {
+    odoSavedKm = odoKm;
+    prefs.putUInt("odoKm", odoKm);
+  }
+}
+
 // Answer one of the dash's 0x490 frames with our overridden version.
 //
 // An override is not a command you send once — it is a standing argument. The
@@ -1000,11 +1151,21 @@ void canOverride(const uint8_t *dash) {
   bool first = !dashSeen;
   dashB0 = dash[0];
   dashSeen = true;
+  lastDash490Ms = millis();          // proof the dash is present
 
   // THE HANDLEBAR ALWAYS WINS. If the rider moves a control themselves, that
   // field's override is released. Without this the app could hold a mode the
   // rider is actively pressing the button to leave, and the only way out would
   // be to find the phone — exactly when they are least able to.
+  // A dash on the bus outranks anything restored from flash: those values are
+  // for a bike that has no handlebar controls left, and asserting them against
+  // a real dash would resume the two-commander fight with nobody having asked.
+  if (first && (ovrMode || ovrRegen)) {
+    ovrMode = ovrRegen = 0;
+    prefs.putUChar("ovrMode", 0);
+    prefs.putUChar("ovrRegen", 0);
+    logLine("[can] dash present - released overrides restored from flash");
+  }
   if (!first && prev != dashB0) {
     if (((prev >> 3) & 7) != ((dashB0 >> 3) & 7)) ovrMode = 0;
     if ((prev & 7) != (dashB0 & 7)) ovrRegen = 0;
@@ -1014,19 +1175,10 @@ void canOverride(const uint8_t *dash) {
   // Built from the dash's own frame so every field we do not own passes through
   // untouched — including the other rider control, which the rider may be
   // changing by hand while we hold this one.
-  twai_message_t t = {};
-  t.identifier = 0x490;
-  t.data_length_code = 8;
-  memcpy(t.data, dash, 8);
   uint8_t b0 = dash[0];
   if (ovrMode)  b0 = (b0 & ~0x38) | ((ovrMode  & 0x07) << 3);   // bits 5:3
   if (ovrRegen) b0 = (b0 & ~0x07) |  (ovrRegen & 0x07);         // bits 2:0
-  t.data[0] = b0;
-
-  // Zero timeout: a full TX queue means the bus is unhealthy, and blocking here
-  // would stall the 100 Hz IMU sampler that everything else depends on. A
-  // dropped frame costs 200 ms of override and heals on the dash's next one.
-  if (twai_transmit(&t, 0) == ESP_OK) canTxOk++; else canTxFail++;
+  canSend490(b0, dash[1]);
 }
 
 // Transmitting means this puck can now lose arbitration and, in the worst case,
@@ -1051,6 +1203,14 @@ void canPoll() {
   // Nothing to override once the bus is gone, and holding the intent across a
   // dropout would re-assert it unannounced when the bike wakes up again.
   if (canS.lastRxMs && millis() - canS.lastRxMs > CAN_STALE_MS) ovrMode = ovrRegen = 0;
+  // Dash absent but the bus alive: nobody to reply to, so broadcast at 5 Hz.
+  uint32_t nowMs = millis();
+  bool dashGone = !lastDash490Ms || nowMs - lastDash490Ms > DASH_GONE_MS;
+  bool busLive = canS.lastRxMs && nowMs - canS.lastRxMs < CAN_STALE_MS;
+  if (dashGone && busLive && (ovrMode || ovrRegen) && nowMs - lastSelfTxMs >= 200) {
+    lastSelfTxMs = nowMs;
+    canFreeRun();
+  }
   twai_message_t m;
   for (int i = 0; i < 16 && twai_receive(&m, 0) == ESP_OK; i++) {
     if (m.extd || m.rtr || m.data_length_code < 8) continue;
@@ -1091,7 +1251,20 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), isrBtn1, CHANGE);
   attachInterrupt(digitalPinToInterrupt(PIN_BUTTON2), isrBtn2, CHANGE);
 
-  prefs.begin("puck", false);           // load the mount reference, if ever zeroed
+  prefs.begin("puck", false);
+  odoKm = odoSavedKm = prefs.getUInt("odoKm", 0);
+  cfgGearX100 = prefs.getUShort("gearX100", cfgGearX100);
+  cfgCircMm   = prefs.getUShort("circMm", cfgCircMm);
+  // Restore the rider's last mode and regen. On a bike whose dash has been
+  // removed the puck IS the dash, and a dash remembers its settings across a
+  // key cycle — without this, every power-on drops to whatever the controller
+  // defaults to, which we measured as Sport, i.e. full power.
+  //
+  // Only ever asserted while no dash is on the bus; canOverride() clears both
+  // the moment a real dash is seen, so a stock bike still boots with nobody
+  // fighting its handlebar.
+  ovrMode  = prefs.getUChar("ovrMode", 0);
+  ovrRegen = prefs.getUChar("ovrRegen", 0);           // load the mount reference, if ever zeroed
   qRef = imu::Quaternion(prefs.getFloat("qw", 1.0f), prefs.getFloat("qx", 0.0f),
                          prefs.getFloat("qy", 0.0f), prefs.getFloat("qz", 0.0f));
   // References saved by builds that stored yaw carry a yaw from a *previous*
@@ -1600,11 +1773,27 @@ void loop() {
       // of the mode field there, so in Eco a nibble read returns 8+level. Only
       // ever 1..4, and the selector reverses at each end instead of wrapping,
       // so 0 never appears on a live bus and can mean "unknown".
+      // Report the regen the bike is actually being HELD at, not the byte the
+      // dash last sent. With the dash unplugged 0x490 is absent, so that byte
+      // reads 0 — "not seen yet" — even while the puck is commanding level 3.
+      // The dashboard hid this by falling back to the override in the status
+      // packet; Tripper reads only this field and correctly showed "—". Report
+      // the truth here and every consumer gets it, now and in future.
+      //
+      // Mode needs no such fix: its bits come from 0x202, the controller's own
+      // report of what it is doing, which follows an override already.
+      uint8_t regenNow = ovrRegen ? ovrRegen : (uint8_t)(canS.f490[0] & 0x07);
       p.canFlags = 0x01 |                          // live
                    (((st >> 7) & 1) << 1) |        // kickstand down
                    (((st >> 4) & 3) << 2) |        // ride mode: 1 Eco, 2 Sport
-                   ((canS.f490[0] & 0x07) << 4);   // regen level 1..4
-      p.canSpeed_dkph = canU16(canS.f303, 0);
+                   ((regenNow & 0x07) << 4) |      // regen level 1..4
+                   ((dashOnBus() ? 0 : 1) << 7);   // bit7: dash ABSENT —
+                   // speed is derived from motor RPM and the odometer is the
+                   // puck's own count, not the bike's.
+      // Dash's own speed when it is on the bus, derived from motor RPM when
+      // it is not. canFlags bit7 says which, so the app never has to guess
+      // whether it is looking at a measurement or an inference.
+      p.canSpeed_dkph = canSpeedDkph();
       p.canRpm        = canU16(canS.f203, 0);
       p.canPower_w    = canU16(canS.f203, 2);
       p.canCurrent_da = canU16(canS.f302, 4);
@@ -1615,7 +1804,9 @@ void loop() {
       p.cellHi_idx    = canS.f201[4];
       p.cellLo_mv     = canU16(canS.f201, 2);
       p.cellLo_idx    = canS.f201[5];
-      p.canOdo_km     = canU16(canS.f402, 2);   // whole km (see canOdo_km)
+      odoUpdate(p.canSpeed_dkph, now - lastOdoMs);
+      lastOdoMs = now;
+      p.canOdo_km     = odoKm;                 // bike's, or ours (see odoUpdate)
     }
 
     chTele->setValue((uint8_t *)&p, sizeof(p));

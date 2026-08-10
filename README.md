@@ -617,8 +617,42 @@ exactly as it did before the characteristic existed.
 | `0x06` | `on u8` | Raw 100 Hz stream on/off. **Boots on** — every ride should be a regression test, and the phone decides whether to keep the bytes. The switch is there for the day a link problem needs the radio quiet |
 | `0x07` | `mode u8` | **Ride-mode override** (ver `0x07`) — 0 releases · 1 Eco · 2 Sport. Held by answering each of the dash's `0x490` frames with the overridden value |
 | `0x08` | `level u8` | **Regen override** (ver `0x07`) — 0 releases · 1–4 selects. Nothing can confirm it took, and the bike inhibits regen above ~90% SOC where it correctly does nothing |
+| `0x09` | `km u32` | **Seed the puck's own odometer** (ver `0x07`). Only needed on a bike whose dash is gone for good — while the dash is present its `0x402` is the authority and overwrites this on the next frame |
 
-Both builds accept all eight opcodes, so the app never has to withhold a write.
+Both builds accept all nine opcodes, so the app never has to withhold a write.
+
+### Standing in for the dash
+
+Unplugging the bike's dash takes **five frames** off the bus with it — proven by
+doing exactly that and diffing the ID list, while every controller and BMS frame
+kept coming:
+
+| Frame | What it carries |
+|---|---|
+| `0x490` | mode + regen command |
+| `0x402` | **odometer** |
+| `0x303` | **speed** |
+| `0x304`, `0x403` | unidentified |
+
+So a bike running without its dash needs the puck to supply three things:
+
+- **The command.** With no dash to answer, the reactive reply has nothing to
+  trigger it — the puck went completely silent (`tx=0`) the first time this was
+  tried. It now free-runs `0x490` at 5 Hz whenever no dash frame has arrived for
+  a second. There is nobody to out-shout in that state, so the contested 2 ms
+  window that modulates the power ceiling does not exist either.
+- **Speed**, derived from `0x203` motor RPM: `km/h = rpm / gearRatio x
+  circumference_m x 0.06`. The app carries wheel-size and gear-ratio settings
+  because the ratio follows the bike's configured gearing, not physics alone.
+- **The odometer**, which the puck counts itself and keeps in flash. It mirrors
+  `0x402` whenever the dash IS present, so plugging the dash in for ten seconds
+  seeds it with the real reading — otherwise `0x09` sets it by hand. Third-party
+  replacement displays start from zero for exactly this reason: the number lives
+  in the cluster and there is nothing on the bus to seed them from.
+
+`canFlags` **bit 7 marks the dash as absent**, so the app can say which of those
+numbers are the bike's own and which are the puck's inference. It renders the
+odometer with a leading `~` in that state.
 
 ### Overriding the bike — what `0x07` and `0x08` actually do
 
@@ -785,8 +819,14 @@ the `CM_` comments of [`tools/talaria.dbc`](tools/talaria.dbc).
 | Odometer | `0x402` | 2–3 LE | 1 km |
 | Throttle demand | `0x202` | 3–4 LE | units unconfirmed |
 
-Speed and RPM hold a fixed 5.887 ratio at r = 0.999 across two independent
-rides; integrating speed reproduces plausible ride distances. Cell high/low
+Speed and RPM hold a fixed ratio within any one ride at r = 0.999, but **the
+ratio is not a constant** — it follows the gear ratio configured on the bike.
+Measured across the two bundled rides: **71.0 rpm per km/h** with the ratio set
+correctly to 1:8.4, and 64.6 with it mis-set to 1:7.5. An earlier "5.887" here
+was wrong by ~12x. The relation is `km/h = rpm / gearRatio x circumference_m x
+0.06`, which back-solves the loaded rolling circumference to 1.971 m. This is
+how a dash-less bike gets its speed back, since `0x303` leaves with the dash.
+Integrating speed reproduces plausible ride distances. Cell high/low
 averaged × 16 reproduces pack voltage to 0.02 V, confirming the 16S pack.
 
 Traps worth knowing:
