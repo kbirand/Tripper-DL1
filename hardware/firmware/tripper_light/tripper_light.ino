@@ -125,8 +125,16 @@ static const char *RAW_UUID  = "8E7C1A20-0F5A-4B9C-9C90-54B1D2A70005";
 
 // ---------- packets (little-endian, packed) ----------
 // Byte-for-byte identical to tripper_puck.ino. Do not reorder either copy.
+// The wire version, in ONE place. The status page carried a hardcoded
+// "packet v0x05" through two format changes and was still claiming 0x05 on a
+// 0x07 puck — which sent this session chasing a firmware-version question the
+// device was actively lying about. A string that describes the wire format is
+// part of that format.
+static constexpr uint8_t PKT_VER = 0x07;
+
 struct __attribute__((packed)) TelemetryPacket {
-  uint8_t  ver;          // 0x06 — 0x05 plus accDev_mg on the tail. 0x05 was
+  uint8_t  ver;          // 0x07 — 0x06 plus canOdo_km on the tail. 0x06 was
+                         // 0x05 plus accDev_mg. 0x05 was
                          // itself byte-identical to 0x04 and marked a semantics
                          // change: gyr*/acc* below are 200 ms window MEANS, not
                          // the newest 100 Hz sample
@@ -214,8 +222,28 @@ struct __attribute__((packed)) TelemetryPacket {
   // LINEAR acceleration — a product of the very fusion this channel exists to
   // cross-check. This is the raw accelerometer, gravity included, untouched.
   uint16_t accDev_mg;
+  // ---- odometer (ver 0x07, 2026-08-10) -------------------------------------
+  // 0x402[2:4], whole km. The bus DOES carry an odometer; the README said it
+  // did not, and that was wrong in an instructive way — it was true of the
+  // eight frames this firmware kept and never checked against the other seven
+  // the bus actually carries. 0x402 was one of the seven. Found by reading the
+  // bike's own display (400 km) and matching it against a full-bus capture, in
+  // which 0x402[2:4] read exactly 400.
+  //
+  // Read as u16 though the field below is u32. Bytes 4:6 of that frame are
+  // zero, so the source could be a u32 spanning 2:6 — but a narrow read is
+  // only ever wrong past 65535 km, while a wide read corrupts the moment those
+  // bytes turn out to belong to something else. The packet field is u32 anyway
+  // because the additive rule makes widening a shipped field impossible, and
+  // an odometer is the last place to want that problem.
+  //
+  // PROVISIONAL until a ride confirms it counts up: this bus is known to carry
+  // round constants (1200 sits in both 0x101[4:6] and 0x302[6:8]), so a single
+  // static match against 400 is suggestive, not proof. What settles it is
+  // 1-2 km of riding moving this field.
+  uint32_t canOdo_km;
 };
-static_assert(sizeof(TelemetryPacket) == 88, "telemetry packet size drifted");
+static_assert(sizeof(TelemetryPacket) == 92, "telemetry packet size drifted");
 
 struct __attribute__((packed)) StatusPacket {
   uint8_t  ver;          // 0x01
@@ -231,8 +259,17 @@ struct __attribute__((packed)) StatusPacket {
   // the app length-gates): 0 = off · 1 = AP up, no client · 1+n = n clients
   // joined. The app's toggle is only a request; this is the confirmation.
   uint8_t  otaState;
+  // Which overrides the puck is actually holding (ver 0x07). Appended, ver
+  // stays 0x01, the app length-gates. bits 3:0 mode (0 none · 1 Eco · 2 Sport)
+  // · bits 7:4 regen (0 none · 1..4).
+  //
+  // This is a report, not an echo of the request. An override can end without
+  // the app doing anything — the rider presses the handlebar button, the bus
+  // goes stale, the link drops — so the app has to be told what is true rather
+  // than assume its last write still stands.
+  uint8_t  ovrState;
 };
-static_assert(sizeof(StatusPacket) == 15, "status packet size drifted");
+static_assert(sizeof(StatusPacket) == 16, "status packet size drifted");
 
 // ---------- raw flight recorder ----------
 // The telemetry packet averages twenty 100 Hz samples into one number. That is
@@ -295,6 +332,7 @@ bool imuOk = false, bmpOk = false, canOk = false;
 // behind every one of them live in tools/talaria.dbc.
 struct CanState {
   uint8_t  f101[8], f201[8], f202[8], f203[8], f302[8], f303[8], f401[8], f490[8];
+  uint8_t  f402[8];   // odometer, ver 0x07
   uint32_t lastRxMs = 0;
   uint32_t frames = 0;
 } canS;
@@ -341,6 +379,28 @@ volatile bool bleZeroReq = false;       // 0x02 control write, consumed in loop(
 volatile bool bleMarkReq = false;       // 0x01 control write, consumed in loop()
 volatile bool bleOtaMsg = false;        // 0x05 control write latched below
 volatile uint8_t bleOtaOnB = 0;
+
+// ---------- bike control (ver 0x07, 2026-08-10) ----------
+// The first thing this puck has ever transmitted. Everything above is a
+// measurement; these two bytes are an instruction to the bike.
+//
+// 0x490 is a COMMAND from the dash to the motor controller, not the echo it was
+// documented as — proven on the bench 2026-08-10: on every mode button press
+// 0x490 moved 20-27 ms BEFORE 0x202, and injecting it from a USB-CAN-A drove
+// the controller to Eco (demand 1100 -> 750) while the dash went on
+// transmitting Sport. So the bike obeys whoever spoke last on this ID.
+//
+// 0 = not overriding, and the bike is left entirely alone.
+volatile uint8_t ovrMode  = 0;          // 1 Eco · 2 Sport
+volatile uint8_t ovrRegen = 0;          // 1..4
+static uint8_t   dashB0 = 0;            // the dash's own 0x490[0], last seen
+static bool      dashSeen = false;
+static uint32_t  canTxOk = 0, canTxFail = 0, canBusOff = 0;
+// Which connection asked for the override. Now that the puck accepts more than
+// one client, "a phone disconnected" is not the same as "the phone that is
+// driving the bike disconnected" — clearing on any disconnect would let one app
+// silently cancel another's override.
+static uint16_t  ovrOwner = BLE_HS_CONN_HANDLE_NONE;
 
 Preferences prefs;
 imu::Quaternion qRef;                   // mount reference; identity until zeroed
@@ -396,16 +456,41 @@ imu::Quaternion qRel() {
 
 // ---------- BLE callbacks ----------
 class SrvCB : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer *, NimBLEConnInfo &) override {
-    Serial.println("[ble] phone connected");
+  void onConnect(NimBLEServer *srv, NimBLEConnInfo &) override {
+    uint8_t n = srv->getConnectedCount();
+    logLine("[ble] phone connected (%u connected)", n);
+    // A BLE peripheral stops advertising the moment it accepts a connection.
+    // Nothing here ever restarted it, so the puck served exactly ONE device at
+    // a time — while NimBLE was configured for 3 the whole time, and the
+    // dashboard app was deliberately skipping the raw stream to leave CCCD
+    // room for a second app that could never actually arrive. The intent was
+    // documented in both repos; this line is what was missing.
+    //
+    // CCCD arithmetic, against a budget of 8: Tripper subscribes to 3
+    // characteristics, the dashboard to 2. Two apps spend 5. A third full
+    // subscriber would reach exactly 8, so 3 connections is the honest ceiling
+    // and matches MAX_CONNECTIONS.
+    if (n < CONFIG_BT_NIMBLE_MAX_CONNECTIONS) {
+      NimBLEDevice::getAdvertising()->start();
+    }
   }
-  void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
-    Serial.printf("[ble] disconnected (reason %d), advertising again\n", reason);
+  void onDisconnect(NimBLEServer *srv, NimBLEConnInfo &info, int reason) override {
+    logLine("[ble] disconnected (reason %d), %u left, advertising again",
+            reason, srv->getConnectedCount());
+    // Drop the override when the connection HOLDING it goes away. The bike
+    // reverts to the dash's own choice within 100 ms of the last frame we send,
+    // so this is not a courtesy — it is the whole safety story. A crashed app,
+    // a flat phone, a rider out of range and a wedged puck all land in the same
+    // place: the handlebar back in charge, with no action required.
+    if (info.getConnHandle() == ovrOwner || srv->getConnectedCount() == 0) {
+      ovrMode = ovrRegen = 0;
+      ovrOwner = BLE_HS_CONN_HANDLE_NONE;
+    }
   }
 };
 
 class CtrlCB : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &) override {
+  void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &info) override {
     NimBLEAttValue v = c->getValue();
     if (v.size() < 1) return;
     switch (v.data()[0]) {
@@ -434,6 +519,32 @@ class CtrlCB : public NimBLECharacteristicCallbacks {
           Serial.printf("[ble] raw stream %s\n", rawEnabled ? "on" : "off");
         }
         break;
+      // 0x07 + [mode u8]: ride-mode override. 0 releases · 1 Eco · 2 Sport.
+      // Anything else releases too — an unknown mode is not worth guessing at
+      // when the safe interpretation is "stop overriding".
+      case 0x07:
+        if (v.size() >= 2) {
+          uint8_t m = v.data()[1];
+          ovrMode = (m == 1 || m == 2) ? m : 0;
+          ovrOwner = ovrMode || ovrRegen ? info.getConnHandle() : BLE_HS_CONN_HANDLE_NONE;
+          logLine("[ble] mode override %u", ovrMode);
+        }
+        break;
+      // 0x08 + [level u8]: regen override. 0 releases · 1..4 selects.
+      //
+      // Unverifiable by design of the bus, not by omission here: changing regen
+      // moves nothing else on CAN, the dash never listens so its display cannot
+      // confirm it, and regen current is unmeasurable because 0x203 power and
+      // 0x302 current are both unsigned. The bike also inhibits regen above
+      // ~90% state of charge, so on a full pack this correctly does nothing.
+      case 0x08:
+        if (v.size() >= 2) {
+          uint8_t r = v.data()[1];
+          ovrRegen = (r >= 1 && r <= 4) ? r : 0;
+          ovrOwner = ovrMode || ovrRegen ? info.getConnHandle() : BLE_HS_CONN_HANDLE_NONE;
+          logLine("[ble] regen override %u", ovrRegen);
+        }
+        break;
     }
   }
 };
@@ -445,7 +556,13 @@ class CtrlCB : public NimBLECharacteristicCallbacks {
 // if the transceiver is unplugged.
 bool canBringup() {
   twai_general_config_t g =
-      TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_GPIO, CAN_RX_GPIO, TWAI_MODE_LISTEN_ONLY);
+      // NORMAL, not LISTEN_ONLY, since ver 0x07: the puck must be able to
+      // transmit 0x490 to override ride mode and regen. It also ACKs now, which
+      // listen-only never did. The README's "it never transmits, so it cannot
+      // disturb the bike" stopped being true here — the guarantee that replaces
+      // it is that nothing is sent unless the rider asks, and every failure
+      // path releases within 100 ms.
+      TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_GPIO, CAN_RX_GPIO, TWAI_MODE_NORMAL);
   g.rx_queue_len = 32;                  // ~92 frames/s; drained every loop pass
   g.alerts_enabled = TWAI_ALERT_NONE;
   twai_timing_config_t t = TWAI_TIMING_CONFIG_250KBITS();
@@ -455,10 +572,71 @@ bool canBringup() {
   return true;
 }
 
+// Answer one of the dash's 0x490 frames with our overridden version.
+//
+// An override is not a command you send once — it is a standing argument. The
+// controller obeys whichever 0x490 it heard last and never latches, and the
+// dash re-asserts its own choice 5 times a second forever. Replying the instant
+// the dash speaks held the controller on 297/297 of its own frames on the bench
+// (2026-08-10); a free-running 20 Hz timer lost 24%, because after each dash
+// frame there was a 50 ms window where the dash's value was the newest thing on
+// the bus. Rate is not the fix — latency is. React, never poll.
+void canOverride(const uint8_t *dash) {
+  uint8_t prev = dashB0;
+  bool first = !dashSeen;
+  dashB0 = dash[0];
+  dashSeen = true;
+
+  // THE HANDLEBAR ALWAYS WINS. If the rider moves a control themselves, that
+  // field's override is released. Without this the app could hold a mode the
+  // rider is actively pressing the button to leave, and the only way out would
+  // be to find the phone — exactly when they are least able to.
+  if (!first && prev != dashB0) {
+    if (((prev >> 3) & 7) != ((dashB0 >> 3) & 7)) ovrMode = 0;
+    if ((prev & 7) != (dashB0 & 7)) ovrRegen = 0;
+  }
+  if (!ovrMode && !ovrRegen) return;
+
+  // Built from the dash's own frame so every field we do not own passes through
+  // untouched — including the other rider control, which the rider may be
+  // changing by hand while we hold this one.
+  twai_message_t t = {};
+  t.identifier = 0x490;
+  t.data_length_code = 8;
+  memcpy(t.data, dash, 8);
+  uint8_t b0 = dash[0];
+  if (ovrMode)  b0 = (b0 & ~0x38) | ((ovrMode  & 0x07) << 3);   // bits 5:3
+  if (ovrRegen) b0 = (b0 & ~0x07) |  (ovrRegen & 0x07);         // bits 2:0
+  t.data[0] = b0;
+
+  // Zero timeout: a full TX queue means the bus is unhealthy, and blocking here
+  // would stall the 100 Hz IMU sampler that everything else depends on. A
+  // dropped frame costs 200 ms of override and heals on the dash's next one.
+  if (twai_transmit(&t, 0) == ESP_OK) canTxOk++; else canTxFail++;
+}
+
+// Transmitting means this puck can now lose arbitration and, in the worst case,
+// drive itself bus-off — something listen-only made impossible. Recover instead
+// of going quietly deaf until the next power cycle.
+void canHealth() {
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) != ESP_OK) return;
+  if (st.state == TWAI_STATE_BUS_OFF) {
+    canBusOff++;
+    twai_initiate_recovery();
+  } else if (st.state == TWAI_STATE_STOPPED) {
+    twai_start();
+  }
+}
+
 // Drain whatever the controller has queued, bounded so a burst can never
 // stretch a loop iteration.
 void canPoll() {
   if (!canOk) return;
+  canHealth();
+  // Nothing to override once the bus is gone, and holding the intent across a
+  // dropout would re-assert it unannounced when the bike wakes up again.
+  if (canS.lastRxMs && millis() - canS.lastRxMs > CAN_STALE_MS) ovrMode = ovrRegen = 0;
   twai_message_t m;
   for (int i = 0; i < 16 && twai_receive(&m, 0) == ESP_OK; i++) {
     if (m.extd || m.rtr || m.data_length_code < 8) continue;
@@ -470,7 +648,10 @@ void canPoll() {
       case 0x302: memcpy(canS.f302, m.data, 8); break;
       case 0x303: memcpy(canS.f303, m.data, 8); break;
       case 0x401: memcpy(canS.f401, m.data, 8); break;
-      case 0x490: memcpy(canS.f490, m.data, 8); break;
+      case 0x402: memcpy(canS.f402, m.data, 8); break;
+      // Reply before storing: the override has to go out while this frame is
+      // still the newest thing the controller has heard.
+      case 0x490: canOverride(m.data); memcpy(canS.f490, m.data, 8); break;
       default: continue;                // other IDs are undecoded, ignore
     }
     canS.lastRxMs = millis();
@@ -598,14 +779,14 @@ void otaSetMode(bool on) {
       char out[512];
       snprintf(out, sizeof(out),
                "Tripper puck - LIGHT build\n"
-               "fw built %s %s (packet v0x05)\n"
+               "fw built %s %s (packet v0x%02X)\n"
                "uptime %lus, reset reason %d, free heap %u\n"
                "cal sys/gyro/accel %d/%d/%d, quatRejects %lu\n"
                "baro %.1f m, temp %.1f C\n"
                "CAN %s, %lu frames\n\n"
                "/log     recent debug lines\n"
                "/update  flash new firmware from a phone browser\n",
-               __DATE__, __TIME__, millis() / 1000UL, (int)esp_reset_reason(),
+               __DATE__, __TIME__, PKT_VER, millis() / 1000UL, (int)esp_reset_reason(),
                (unsigned)ESP.getFreeHeap(), calSys, calGyro, calAcc,
                (unsigned long)quatRejects, lastBaroAlt, lastTempC,
                canOk ? "ok" : "FAIL", (unsigned long)canS.frames);
@@ -644,7 +825,14 @@ void otaSetMode(bool on) {
         "Do not lock the phone or leave this page while it runs. "
         "The puck reboots by itself when it finishes.</p>"
         "<form id=f method=POST action='/update' enctype='multipart/form-data'>"
-        "<input type=file name=fw accept='.bin,application/octet-stream' required>"
+        // No accept= here, deliberately — do not "helpfully" add one back.
+        // iOS resolves accept= to UTIs, has none for .bin and nothing browsable
+        // for application/octet-stream, and rather than fall back to showing
+        // everything it declines to open the picker at all: the button does
+        // nothing, with no error. Bare, Safari offers Browse and the Files app
+        // hands over the .bin. Desktop browsers were never fussy enough to
+        // notice the difference, which is why it shipped.
+        "<input type=file name=fw required>"
         "<button type=submit>Upload</button></form><div id=s></div>"
         "<script>"
         // XHR rather than a plain submit so the phone shows real progress —
@@ -866,7 +1054,7 @@ void loop() {
       lastBaroAlt = 44330.0f * (1.0f - powf(lastPressPa / 101325.0f, 0.1903f));
     }
     TelemetryPacket p = {};
-    p.ver = 0x06;                       // 0x05 + the accelerometer window peak
+    p.ver = PKT_VER;                    // see PKT_VER for what it means
     // No GPS in this build. flags stays 0 and the position block stays zeroed,
     // which is the same state the Full build reports before it gets a fix — so
     // the app's existing gating covers this without a special case.
@@ -937,6 +1125,7 @@ void loop() {
       p.cellHi_idx    = canS.f201[4];
       p.cellLo_mv     = canU16(canS.f201, 2);
       p.cellLo_idx    = canS.f201[5];
+      p.canOdo_km     = canU16(canS.f402, 2);   // whole km (see canOdo_km)
     }
 
     chTele->setValue((uint8_t *)&p, sizeof(p));
@@ -981,6 +1170,7 @@ void loop() {
     s.marker = markerCount;
     s.caps = BUILD_CAPS;                // tells the app this is the Light build
     s.otaState = otaActive ? (uint8_t)(1 + WiFi.softAPgetStationNum()) : 0;
+    s.ovrState = (uint8_t)((ovrMode & 0x0F) | ((ovrRegen & 0x0F) << 4));
     chStat->setValue((uint8_t *)&s, sizeof(s));
     if (bleServer->getConnectedCount() > 0) chStat->notify();
 
@@ -994,9 +1184,25 @@ void loop() {
     // boot; a climbing number means the I2C run to the BNO055 is marginal.
     // Through logLine, so the last ~8 KB of these are readable at /log
     // whenever WiFi flashing mode is up — no USB cable, no dismount.
+    // CAN transmit health, added with bike control. twai_transmit() returning
+    // ESP_OK only means the frame was QUEUED — it is not evidence it reached
+    // the bus, which is exactly the mistake that makes a silent TX failure look
+    // like success. txerr and the driver state are the real evidence: a
+    // transceiver that cannot drive the bus (unwired TX, or an SN65HVD230 held
+    // in standby by its Rs pin) shows txerr climbing to 128+ and the state
+    // leaving RUNNING, while queue counts look perfectly healthy.
+    twai_status_info_t ts = {};
+    const char *tstate = "?";
+    if (canOk && twai_get_status_info(&ts) == ESP_OK) {
+      tstate = ts.state == TWAI_STATE_RUNNING  ? "run"
+             : ts.state == TWAI_STATE_BUS_OFF  ? "BUSOFF"
+             : ts.state == TWAI_STATE_RECOVERING ? "recov"
+             : ts.state == TWAI_STATE_STOPPED  ? "stop" : "?";
+    }
     logLine("[dbg] conn=%d R=%+.1f P=%+.1f gz=%+.1f cal=%d%d%d qrej=%lu "
             "baro=%.1fm mark=%d "
-            "lps=%lu stall=%lu can=%s/%lu %u%% %.1fV regen=%u",
+            "lps=%lu stall=%lu can=%s/%lu %u%% %.1fV regen=%u "
+            "ovr=%u/%u tx=%lu/%lu %s txerr=%u rxerr=%u q=%lu boff=%lu",
             bleServer->getConnectedCount(), dbgR, dbgP, lastGyro.z(),
             calSys, calGyro, calAcc, (unsigned long)quatRejects,
             lastBaroAlt, markerCount, loopsPerSec, maxLoopGapMs,
@@ -1004,7 +1210,11 @@ void loop() {
             (unsigned long)canS.frames,
             canLive ? canS.f401[0] : 0,
             canLive ? canU16(canS.f101, 0) / 10.0f : 0.0f,
-            canLive ? (canS.f490[0] & 0x07) : 0);
+            canLive ? (canS.f490[0] & 0x07) : 0,
+            ovrMode, ovrRegen,
+            (unsigned long)canTxOk, (unsigned long)canTxFail, tstate,
+            ts.tx_error_counter, ts.rx_error_counter,
+            (unsigned long)ts.msgs_to_tx, (unsigned long)canBusOff);
     loopsPerSec = 0;
     maxLoopGapMs = 0;
   }

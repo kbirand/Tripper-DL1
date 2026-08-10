@@ -427,7 +427,7 @@ Device name `Tripper-DL1`. One service, four characteristics:
 | UUID | Char | Direction |
 |---|---|---|
 | `8E7C1A20-0F5A-4B9C-9C90-54B1D2A70001` | *service* | |
-| `…0002` | telemetry | notify + read, 5 Hz, 88 B |
+| `…0002` | telemetry | notify + read, 5 Hz, 92 B |
 | `…0003` | status | notify + read, 1 Hz, 15 B |
 | `…0004` | control | write / write-no-response |
 | `…0005` | raw | notify, 10 Hz, 148 B — the un-averaged 100 Hz IMU stream |
@@ -470,6 +470,7 @@ Device name `Tripper-DL1`. One service, four characteristics:
 | 78 | i16×3 | acc x y z | **raw** accelerometer, mg (sensor frame) — gravity included, pre-fusion. **`0x05`: window mean**, as `gyr` |
 | 84 | u16 | quatRejects | non-unit `getQuat()` reads dropped since boot, saturating |
 | 86 | u16 | accDev_mg | **`0x06`:** largest \|‖a‖ − 1 g\| seen at 100 Hz inside this window, mg — the peak the `acc` mean cannot show |
+| 88 | u32 | canOdo_km | **`0x07`:** the bike's odometer, whole km, from CAN `0x402[2:4]`. 0 means not seen yet |
 
 Bytes 50–69 are the bike's CAN bus, read listen-only from a SN65HVD230 on
 D8/D9 (see [Bike CAN bus](#bike-can-bus-talaria)). **The whole block is zeroed
@@ -614,8 +615,56 @@ exactly as it did before the characteristic existed.
 | `0x04` | `active u8 · elapsed_s u32` | Ride state — **Full:** inverts the OLED and adds the trip-time screen, elapsed seeds the timer. **Light:** accepted and logged, no display. The app re-sends it on every reconnect |
 | `0x05` | `on u8` | WiFi flashing mode — raises the puck's own SoftAP for OTA and the diagnostics/`/update` web server. Never persists across a power cycle. Live state comes back in `otaState`. See [`docs/flashing.md`](docs/flashing.md) |
 | `0x06` | `on u8` | Raw 100 Hz stream on/off. **Boots on** — every ride should be a regression test, and the phone decides whether to keep the bytes. The switch is there for the day a link problem needs the radio quiet |
+| `0x07` | `mode u8` | **Ride-mode override** (ver `0x07`) — 0 releases · 1 Eco · 2 Sport. Held by answering each of the dash's `0x490` frames with the overridden value |
+| `0x08` | `level u8` | **Regen override** (ver `0x07`) — 0 releases · 1–4 selects. Nothing can confirm it took, and the bike inhibits regen above ~90% SOC where it correctly does nothing |
 
-Both builds accept all six opcodes, so the app never has to withhold a write.
+Both builds accept all eight opcodes, so the app never has to withhold a write.
+
+### Overriding the bike — what `0x07` and `0x08` actually do
+
+Until ver `0x07` this puck could not transmit at all. It now does, and the two
+rules that make that safe are worth stating outright.
+
+**An override is a standing argument, not a command.** `0x490` is the dash's
+mode/regen command to the motor controller, the controller obeys whichever copy
+it heard *last*, and it never latches — so the dash's next frame, 200 ms later,
+undoes anything sent once. The puck therefore answers **every** `0x490` the dash
+sends, immediately, for as long as an override is held. Bench-measured
+2026-08-10: replying on receipt held the controller on **297/297** of its own
+frames, where a free-running 20 Hz injection lost 24%. Latency is the mechanism,
+not rate.
+
+**Every failure path releases.** BLE disconnect, CAN going stale, and the rider
+pressing the handlebar button all drop the override, and the bike is back under
+the dash's control within 100 ms of the last frame the puck sends. The
+handlebar-button rule matters most: without it software could hold a mode the
+rider is actively pressing to leave, and the only escape would be finding the
+phone.
+
+The puck reports what it is actually holding in the status packet's `ovrState`,
+which is not an echo of the request — an override can end without the app doing
+anything, so the app must render the report rather than its own intent.
+
+**The bike's own screen will disagree.** The dash never listens to the bus; it
+displays its own selection. While an override is held the display and the
+machine genuinely differ, and no firmware change can fix that from this side.
+
+### More than one app at a time
+
+The puck accepts up to **3 simultaneous connections** (`CONFIG_BT_NIMBLE_MAX_CONNECTIONS`),
+but until 2026-08-10 it served exactly one. A BLE peripheral stops advertising
+the moment it accepts a connection, and while `advertiseOnDisconnect(true)`
+brought it back when a device *left*, nothing ever restarted it on connect —
+so a second app could never find the puck. `onConnect` now resumes advertising
+while there is room.
+
+The CCCD budget is 8. Tripper subscribes to 3 characteristics and the dashboard
+app to 2 — which is exactly why the dashboard leaves the raw stream alone. Two
+apps spend 5 of 8; a third full subscriber would reach the ceiling.
+
+An override belongs to the **connection that requested it** and is released when
+that connection drops, not when any client happens to disconnect. Otherwise one
+app leaving would silently cancel another's override.
 
 ## IMU calibration
 
@@ -732,7 +781,8 @@ the `CM_` comments of [`tools/talaria.dbc`](tools/talaria.dbc).
 | Kickstand | `0x202` | byte 0 bit 7 | 1 = down |
 | Ride mode | `0x202` | byte 0 bits 5:4 | 1 Eco, 2 Sport |
 | Regen level | `0x490` | byte 0 bits 2:0 | 1–4 |
-| Ride mode echo | `0x490` | byte 0 bits 5:3 | 1 Eco, 2 Sport |
+| Ride mode (dash command) | `0x490` | byte 0 bits 5:3 | 1 Eco, 2 Sport |
+| Odometer | `0x402` | 2–3 LE | 1 km |
 | Throttle demand | `0x202` | 3–4 LE | units unconfirmed |
 
 Speed and RPM hold a fixed 5.887 ratio at r = 0.999 across two independent
@@ -745,12 +795,37 @@ Traps worth knowing:
   actual charge is elsewhere — almost certainly state of *health*.
 - **`0x202[6:8]` is not an odometer.** It is monotonic, which is why it looks
   like one, but its rate has correlation −0.0005 with speed and its counts per
-  km differ 34% between rides. No odometer has been found on the bus.
-- **`0x490[0]` is not a temperature, and it is not one field.** Bits 5:3 echo
+  km differ 34% between rides. **The odometer is `0x402[2:4]`**, whole km — see
+  below.
+- **The bus carries 15 IDs; this firmware kept 8.** "No odometer has been found
+  on the bus" stood here for months and was false: it had been concluded from
+  the eight frames the puck captures, and `0x402` was one of the seven nobody
+  had ever decoded. Found 2026-08-10 by reading the odometer off the bike's own
+  display (400 km) and looking for that number in a full-bus capture — `0x402
+  [2:4]` read exactly 400. **Provisional** until a ride shows it incrementing:
+  this bus carries round constants (1200 sits in both `0x101[4:6]` and
+  `0x302[6:8]`), so one static match against a round number is suggestive, not
+  proof. The lesson generalises — capture every ID, not the ones you decode,
+  and when the vehicle already displays a number, use it as ground truth.
+- **`0x490[0]` is not a temperature, and it is not one field.** Bits 5:3 carry
   the ride mode (r = 0.99, which is why the whole byte looked like mode alone)
   and bits 2:0 carry the regen level. Reading the low *nibble* as regen works
   only in Sport: in Eco bit 3 is set, so regen 1 reads `0x09` rather than
   `0x01`. Mask 3 bits, not 4.
+- **`0x490` is a COMMAND from the dash, not an echo from the controller.** It
+  was labelled an echo until 2026-08-10. Across five button presses `0x490[0]`
+  moved *first* every time, with `0x202` following 20–27 ms later carrying both
+  the new mode bits and the new demand floor (Sport 1100 / Eco 750). Injecting
+  `0x490` with Eco, while the dash went on sending Sport at 5 Hz, held the
+  controller at `demand=750` for the whole burst — so the controller obeys the
+  bus, and `0x202` and `0x490` are different nodes. Consequences if you ever
+  want to *control* one of these bikes: the controller follows the most recent
+  `0x490` and never latches, so an override must out-transmit the dash
+  continuously (free-running at 20 Hz still lost 24% of the time; replying the
+  instant the dash speaks held 297/297); the dash never listens, so an
+  overridden bike disagrees with its own screen; and regen can be commanded but
+  **not verified from anywhere** — it moves nothing else on the bus, and regen
+  current is unmeasurable because power and current are unsigned.
 - **Byte offsets vary by firmware.** Throttle demand sits at `0x202[3:5]` here
   but at `0x202[2:4]` on the bike in the reference logs, where it doesn't
   track throttle at all. Verify offsets before trusting this on another bike.

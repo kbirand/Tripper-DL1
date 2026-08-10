@@ -44,7 +44,9 @@ roll, right-positive, = `atan2(+accY, +accZ)`; the bike parked on its
 
 Never reorder or resize existing fields. New fields append; the app gates on
 **length**, not version, so old apps parse new packets and drop the tail.
-Telemetry is 88 B, `ver 0x06`: the 0x05 layout plus `accDev_mg` on the tail.
+Telemetry is 92 B, `ver 0x07`: the 0x06 layout plus `canOdo_km` on the tail
+(the bike's odometer, whole km, from CAN `0x402[2:4]` — see "The odometer"
+below). 0x06 was 0x05 plus `accDev_mg`.
 0x05 was byte-identical to 0x04 with a semantics change — the gyro/raw-accel
 fields carry the **mean over the 200 ms packet window** (~20 samples at
 100 Hz) instead of the newest sample, and the baro is read at 5 Hz (was 1 Hz —
@@ -53,7 +55,11 @@ it staircased under the app's 10 m slope fit). Status is 15 B:
 
 Control writes: `0x01` marker · `0x02` mount zero (refused until accel cal
 usable) · `0x03` identify · `0x04` ride state · `0x05` + [on u8] WiFi
-flashing mode · `0x06` + [on u8] raw stream (boots **on**).
+flashing mode · `0x06` + [on u8] raw stream (boots **on**) · `0x07` + [mode u8]
+ride-mode override (0 release · 1 Eco · 2 Sport) · `0x08` + [level u8] regen
+override (0 release · 1–4). Status is 16 B since 0x07: `ovrState` on the tail,
+bits 3:0 mode · bits 7:4 regen, reporting what the puck IS holding rather than
+what was asked for.
 
 ### `accDev_mg` — the peak beside the mean (0x06, 2026-08-09)
 
@@ -73,6 +79,46 @@ on the puck — a mean cannot be un-averaged downstream.
 
 Not `maxG_mg`, which is the peak of the fusion's LINEAR accel and therefore a
 product of the fusion this channel exists to cross-check.
+
+## The puck now transmits — bike control (0x07, 2026-08-10)
+
+`0x490` is a **command from the dash to the motor controller**, not the echo it
+was documented as for months. Two bench measurements settled it: on every mode
+button press `0x490` moved 20–27 ms *before* `0x202`, and injecting `0x490`
+with Eco while the dash went on sending Sport drove the controller's demand
+floor 1100 → 750. So the bike obeys whoever spoke last on that ID, and
+`TWAI_MODE_LISTEN_ONLY` became `TWAI_MODE_NORMAL` in both builds.
+
+**"It never transmits, so it cannot disturb the bike" is no longer true.** What
+replaces it: nothing is sent unless the rider asks, and every failure path
+releases within 100 ms — BLE disconnect, CAN stale, or the rider pressing the
+handlebar button, which always wins.
+
+**React, never poll.** The controller never latches, and the dash re-asserts at
+5 Hz forever, so the override answers each dash frame the instant it arrives.
+Free-running at 20 Hz lost 24% of samples (a current limit oscillating between
+750 and 1100 several times a second); replying on receipt held 297/297.
+
+**CONFIRMED ON HARDWARE 2026-08-10.** Flashed over WiFi and tested with the
+bike on a stand: the app sets the mode and the bike obeys. `tx` climbs by
+exactly 5/s — one reply per dash frame, no waste — with `txerr=0`, `boff=0` and
+the driver never leaving `run` over ~1000 transmits. The transmit path is clean;
+`rxerr` blips to 4-5 occasionally and self-clears, which is what two nodes
+sharing an arbitration ID look like.
+
+**The bike's display cannot be updated, and never will be.** The dash renders
+its own internal state and ignores the bus completely — during the 30 s
+injection test `0x202` reported Eco throughout while the screen stayed on Sport,
+so the dash ignores the CONTROLLER's frame too, not just ours. While an override
+is held the bike has two disagreeing instruments and the app is the honest one
+(its mode comes from `0x202`). Pressing the handlebar button releases the
+override AND realigns the display, so the disagreement cannot get stuck.
+
+**Regen is commandable but unverifiable.** It moves nothing else on the bus, the
+dash never listens so its display cannot confirm it, and regen current is
+unmeasurable because `0x203` power and `0x302` current are both unsigned. The
+bike also inhibits regen above ~90% SOC. Nothing is confirmed here — the
+spin-down test in `TODO.md` is what would settle it.
 
 ## The raw stream — characteristic `…0005` (added 2026-08-09)
 

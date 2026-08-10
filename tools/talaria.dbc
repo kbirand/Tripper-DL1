@@ -31,7 +31,7 @@ NS_ :
     SG_MUL_VAL_
 
 BS_:
-BU_: BMS MotorController Dash
+BU_: BMS MotorController Dash Unknown
 
 
 BO_ 257 BMS_Pack: 8 BMS
@@ -45,7 +45,7 @@ BO_ 513 BMS_Cells: 8 BMS
    SG_ CellLow_Index : 40|8@1+ (1,0) [1|16] "" Dash
    SG_ Unknown_7 : 56|8@1+ (1,0) [0|255] "" Dash
 
-BO_ 514 DisplayState: 8 Dash
+BO_ 514 ControllerState: 8 MotorController
    SG_ Standstill : 1|1@1+ (1,0) [0|1] "" Dash
    SG_ RideMode : 4|2@1+ (1,0) [0|3] "" Dash
    SG_ Kickstand : 7|1@1+ (1,0) [0|1] "" Dash
@@ -70,9 +70,13 @@ BO_ 1025 BMS_Status: 8 BMS
    SG_ Unknown_2 : 16|8@1+ (1,0) [0|255] "" Dash
    SG_ Unknown_3 : 24|8@1+ (1,0) [0|255] "" Dash
 
-BO_ 1168 ModeEcho: 8 MotorController
-   SG_ RegenLevel : 0|3@1+ (1,0) [1|4] "" Dash
-   SG_ ModeLevel : 3|3@1+ (1,0) [1|2] "" Dash
+BO_ 1026 Odometer: 8 Unknown
+   SG_ Odometer_km : 16|16@1+ (1,0) [0|65535] "km" Dash
+   SG_ Unknown_6 : 48|16@1+ (1,0) [0|65535] "" Dash
+
+BO_ 1168 ModeCommand: 8 Dash
+   SG_ RegenLevel : 0|3@1+ (1,0) [1|4] "" MotorController
+   SG_ ModeLevel : 3|3@1+ (1,0) [1|2] "" MotorController
 
 
 CM_ BO_ 257 "Pack voltage at 0.1 V resolution. Cross-checked against the sum of the 16 cell voltages in 0x201.";
@@ -82,11 +86,14 @@ CM_ SG_ 515 Power "Peak 5740 W vs peak V*I of 5923 W computed from 0x101 voltage
 CM_ SG_ 770 Current "0.1 A units, peaks near 102 A.";
 CM_ SG_ 771 Speed "0.1 km/h. Integrating over ride_2 gives 8.93 km in 27.2 min (19.7 km/h average); over ride_1, 3.05 km in 8.3 min.";
 CM_ SG_ 1025 StateOfCharge "Reads exactly 100 for all of ride_1 and steps monotonically 86 -> 75 across ride_2.";
+CM_ BO_ 1026 "The bike's odometer, and a standing correction to 'there is no odometer on this bus at all' - a claim that stood in two READMEs and was drawn entirely from the 8 frames the puck captures while the bus carries 15. 0x402 was one of the seven nobody had decoded. Identified 2026-08-10 by reading the number off the bike's own display (400 km) and finding it in a full-bus capture: 0x402[2:4] read exactly 400. Sender unverified - it is attributed to Unknown rather than guessed at, since nothing in the capture distinguishes which node emits it. PROVISIONAL: this bus carries round constants (1200 appears in both 0x101[4:6] and 0x302[6:8]), so one static match against a round number is suggestive, not proof. Riding 1-2 km and watching it increment is what settles it. Read as u16 rather than the u32 that bytes 2:6 would allow - bytes 4:5 are zero on a stationary bike, but a narrow read is only wrong past 65535 km while a wide one corrupts the moment those bytes belong to something else.";
+CM_ SG_ 1026 Unknown_6 "Unidentified, and it MOVES: 3634 in one capture on 2026-08-10 and 0 in another about an hour later, with the odometer at 400 km in both and the bike stationary throughout. Not a finer-resolution distance - it fell to zero while distance cannot. Bytes 4:5 stayed zero across every capture, which is what makes the u16 odometer read at 2:4 safe.";
+CM_ BO_ 514 "Sent by the motor controller, not the dash - it was attributed to the dash until 2026-08-10. It carries Kickstand and Standstill, which are the controller's own sensors, and its mode bits and Demand floor FOLLOW 0x490 by 20-27 ms rather than leading it. The 2026-08-10 injection test is decisive: with an injected 0x490 commanding Eco while the dash still commanded Sport, this frame reported Eco - so it cannot be the same node that sends 0x490. See the comment on 1168.";
 CM_ SG_ 514 FreeCounter "12-bit free-running counter. NOT an odometer - it accumulates while stopped and its counts/km differ by 34% between rides.";
 CM_ SG_ 514 Kickstand "Hard interlock, confirmed twice. In the ride logs it is set for 12.4%/35.2% of samples but 0.00% of samples above 2 km/h (max speed while set: 0.0 km/h). Directly toggled on the bench 2026-07-23: folding the stand drove 0x202[0] 0x20 <-> 0xA0.";
 CM_ SG_ 514 StandUp "Companion to Kickstand, inverted: 0x202[1] bit0 goes 1 -> 0 on the same frame the stand comes down. Observed on every bench toggle.";
 CM_ SG_ 514 Demand "Bench-observed: rests at a mode floor (750 Eco / 1100 Sport) and climbs to 1200 under throttle, LEADING MotorRPM by ~0.3 s - it moves before the motor responds, so it is a command rather than a measurement. 1200 also appears as a fixed constant in 0x101[4:6] and 0x302[6:8], consistent with a rated ceiling. If the units are 0.1 A this reads as 75.0/110.0 A limits against a 120.0 A rating, and ride_2's peak current of 101.6 A against its own 1000 (=100.0 A) ceiling supports that - but it is one data point, so treat the unit as unconfirmed. WARNING: on the firmware in the inklit ride logs this field sits one byte lower, at 0x202[2:4], and is mode-linked only - it does not track throttle there. Check the offset before trusting it on another bike.";
-CM_ BO_ 1168 "NOT a temperature. 0x490[0] correlates 0.996 (ride_1) and 0.963 (ride_2) with RideMode and only 0.30/0.43 with elapsed time. Confirmed on the bench 2026-07-23: switching Eco/Sport drove it 0x09 <-> 0x11 in the same frame as the 0x202[0] mode bits. An earlier reading of it as a warming component was wrong; the apparent rise across ride_2 was the rider changing mode. The byte is two fields, not one: bits 5:3 carry the mode and bits 2:0 the regen level, which is why the whole-byte value tracked mode so well while never being only mode.";
+CM_ BO_ 1168 "A COMMAND from the dash to the controller, not an echo - it was named ModeEcho until 2026-08-10 and that was backwards. Two findings settle the direction. (1) In a 110 s bench capture with five button presses, 0x490[0] changed FIRST on both mode transitions and the next 0x202 followed 20-27 ms later, carrying both the new mode bits and the new Demand floor (Sport 1100 / Eco 750). (2) Injecting 0x490#0960000000000000 (Eco) at 20 Hz for 2 s from a USB-CAN-A, while the dash kept transmitting 0x11 (Sport) at 5 Hz, drove 0x202 to mode=Eco demand=750 on all 20 frames of the burst, and it reverted to Sport/1100 in under 100 ms once the burst stopped. The controller follows the most recent 0x490 and does not latch, so holding an override means out-transmitting the dash continuously at more than 5 Hz. That the dash went on sending Sport throughout also proves 0x202 and 0x490 come from different nodes: no node would broadcast mode=Eco in one frame and command Sport in another. Regen has no such witness - regen changes moved nothing else on the bus, and regen current is unmeasurable because 0x203 power and 0x302 current are unsigned, so an injected regen level cannot be confirmed from the bus at all. NOT a temperature. 0x490[0] correlates 0.996 (ride_1) and 0.963 (ride_2) with RideMode and only 0.30/0.43 with elapsed time. Confirmed on the bench 2026-07-23: switching Eco/Sport drove it 0x09 <-> 0x11 in the same frame as the 0x202[0] mode bits. An earlier reading of it as a warming component was wrong; the apparent rise across ride_2 was the rider changing mode. The byte is two fields, not one: bits 5:3 carry the mode and bits 2:0 the regen level, which is why the whole-byte value tracked mode so well while never being only mode.";
 CM_ SG_ 1168 RegenLevel "Bits 2:0, reads 1..4. Bench-verified 2026-07-30 across two independent captures and 10 button presses: 0x490[0] stepped 0x11/0x12/0x13/0x14 in lock step with the dash. One sweep ran DOWNWARD (4->3->2->1) before coming back up, which rules out a coincidental monotonic counter. The selector reverses at each end rather than wrapping, so 0 never appears on a live bus and can safely mean unknown. NOT the low nibble: bit 3 belongs to ModeLevel, so in Eco the same regen 1 reads 0x09 - exactly the value logged on 2026-07-23.";
 CM_ SG_ 1168 ModeLevel "Bits 5:3, 1 Eco / 2 Sport - the same encoding RideMode uses in 0x202[0]. This split is what reconciles the 2026-07-23 Eco/Sport toggle (0x09 <-> 0x11) with the 2026-07-30 regen sweep: 0x09 is Eco+regen1, 0x11 is Sport+regen1. Bits 7:6 stayed 0 through every capture and are still unidentified.";
 

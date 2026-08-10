@@ -9,17 +9,24 @@ Everything here defaults to LISTEN-ONLY (silent) mode: the transceiver never
 drives the bus and never even sends ACKs, so a wrong bitrate cannot spew error
 frames at the bike's controller. Leaving silent mode requires --mode normal.
 
-    scan   sweep candidate bitrates, report which one decodes traffic
-    sniff  live table of IDs with a per-byte change map
-    log    record to a file (.asc / .blf / .csv / .log) for later analysis
+    scan        sweep candidate bitrates, report which one decodes traffic
+    sniff       live table of IDs with a per-byte change map
+    events      report byte changes only - press one control at a time
+    transitions re-analyse a saved log the way `events` would have
+    log         record to a file (.asc / .blf / .csv / .log) for later analysis
+    send        TRANSMIT frames - the only command that drives the bus
 
 Usage:
     python3 can_sniff.py scan  -p /dev/cu.usbserial-510
     python3 can_sniff.py sniff -p /dev/cu.usbserial-510 -b 500000
     python3 can_sniff.py log   -p /dev/cu.usbserial-510 -b 500000 -o ride.asc
+    python3 can_sniff.py events -b 250000 --log press.asc -s 90
+    python3 can_sniff.py transitions press.asc
+    python3 can_sniff.py send  -b 250000 490#1160000000000000 --watch 2
 """
 
 import argparse
+import struct
 import sys
 import time
 from collections import OrderedDict
@@ -46,12 +53,30 @@ def open_bus(port, bitrate, frame_type="STD", mode="silent", serial_baud=2000000
     )
 
 
+def recv(bus, timeout=0.05):
+    """bus.recv() that survives a truncated frame.
+
+    The seeedstudio backend reads the 0xAA start byte and then reads the rest
+    of the frame with no timeout guard, so if the serial read expires mid-frame
+    it calls ord() on b'' and raises. A short recv timeout makes that likely -
+    it killed a 100 s injection run on the bike at second 30. Dropping the torn
+    frame is always right: the next one is 11 ms away on this bus.
+
+    Keep the timeout comfortably above one frame time. It costs no latency,
+    because recv returns the moment a frame lands, and this bus is never quiet.
+    """
+    try:
+        return bus.recv(timeout=timeout)
+    except (TypeError, struct.error):
+        return None
+
+
 def drain(bus, seconds):
     """Collect messages for `seconds`. Returns (count, {(id, ext), ...})."""
     count, ids = 0, set()
     deadline = time.time() + seconds
     while time.time() < deadline:
-        msg = bus.recv(timeout=0.05)
+        msg = recv(bus)
         if msg is not None:
             count += 1
             ids.add((msg.arbitration_id, msg.is_extended_id))
@@ -90,6 +115,10 @@ SIGNALS = [
     # mode-dependent floor. Note this sits at [2:4] on the firmware in the
     # inklit ride logs, where it is mode-linked only and does not track throttle.
     ("Demand", 0x202, lambda d: _u16(d, 3), "", "%6.0f"),
+    # Found 2026-08-10 by matching the bike's own display (400 km) against a
+    # full-bus capture. Provisional until a ride shows it incrementing — this
+    # bus carries round constants, so one static match is not proof.
+    ("Odo", 0x402, lambda d: _u16(d, 2), "km", "%6.0f"),
 ]
 
 MODES = {1: "Eco", 2: "Sport"}
@@ -255,7 +284,7 @@ def cmd_sniff(args):
         while True:
             if args.seconds and time.time() - started > args.seconds:
                 break
-            msg = bus.recv(timeout=0.05)
+            msg = recv(bus)
             if msg is not None:
                 if wanted is None or msg.arbitration_id in wanted:
                     total += 1
@@ -314,58 +343,302 @@ def draw(tracks, total, elapsed, args, cells=()):
 # -------------------------------------------------------------------------- events
 
 
+class ChangeDetector:
+    """Per-byte change tracking with a learn-then-report split.
+
+    Ordering is reported as an arrival sequence number, not a timestamp. The
+    adapter hands us one serial stream, so the order bytes arrive IS the order
+    the frames reached it, while host timestamps jitter with USB scheduling.
+    When two frames change in the same burst, `seq` says which moved first and
+    the clock does not - that ordering is what separates a command from its
+    echo.
+    """
+
+    def __init__(self, ignore_ids=()):
+        self.last = {}       # (id, byte index) -> value
+        self.noisy = set()   # bytes that moved on their own during the baseline
+        self.ignore_ids = set(ignore_ids)
+        self.seq = 0
+
+    def feed(self, arb, data, learning):
+        """Consume one frame. Returns [(index, prev, new)] worth reporting."""
+        self.seq += 1
+        if arb in self.ignore_ids:
+            return []
+        out = []
+        for i, byte in enumerate(data):
+            key = (arb, i)
+            prev = self.last.get(key)
+            self.last[key] = byte
+            if prev is None or prev == byte:
+                continue
+            if learning:
+                self.noisy.add(key)
+            elif key not in self.noisy:
+                out.append((i, prev, byte))
+        return out
+
+    def suppressed(self):
+        return ", ".join(f"{a:03X}[{b}]" for a, b in sorted(self.noisy)) or "none"
+
+
+def bits_of(prev, new):
+    delta = prev ^ new
+    return " ".join(f"bit{b}" for b in range(8) if delta >> b & 1)
+
+
+def annotate(arb, index, new):
+    """Name the field when we already know what it is - keeps the eye honest."""
+    if arb == 0x202 and index == 0:
+        return (f"mode={MODES.get((new >> 4) & 3, '?')} "
+                f"kickstand={'DOWN' if new >> 7 & 1 else 'up'}")
+    if arb == 0x490 and index == 0:
+        return f"mode={MODES.get((new >> 3) & 7, '?')} regen={new & 7}"
+    return ""
+
+
+class BurstPrinter:
+    """Group changes into bursts so one button press reads as one block."""
+
+    def __init__(self, gap, t0):
+        self.gap = gap
+        self.t0 = t0
+        self.last_ts = None
+        self.n = 0
+
+    def emit(self, ts, seq, arb, index, prev, new):
+        if self.last_ts is None or ts - self.last_ts > self.gap:
+            self.n += 1
+            print(f"\n--- event {self.n} @ {ts - self.t0:.2f}s "
+                  f"{'-' * 46}")
+        self.last_ts = ts
+        note = annotate(arb, index, new)
+        print(f"  #{seq:<7} {ts - self.t0:8.3f}s  {arb:03X}[{index}]  "
+              f"0x{prev:02X} -> 0x{new:02X}  {bits_of(prev, new):<22} {note}")
+
+
 def cmd_events(args):
     """Learn which bytes are noisy, then report only meaningful changes.
 
     Run it, sit still through the baseline, then work one control at a time:
-    the byte that moves is the one carrying it.
+    the byte that moves is the one carrying it. `--log` keeps the raw capture,
+    because a session of button presses costs the rider's time and `transitions`
+    can re-analyse the same file with different settings for free.
     """
     try:
         bus = open_bus(args.port, args.bitrate, args.frame_type, "silent", args.serial_baud)
     except Exception as exc:
         sys.exit(f"could not open {args.port}: {exc}")
 
-    last = {}      # (id, byte) -> value
-    noisy = set()  # bytes that moved on their own during the baseline
+    det = ChangeDetector(int(x, 16) for x in (args.ignore or ()))
     started = time.time()
+    printer = BurstPrinter(args.gap, started)
+    logger = can.Logger(args.log) if args.log else None
+    announced = False
 
     print(f"Baseline: hold still and touch nothing for {args.baseline:.0f}s ...")
+    sys.stdout.flush()
     try:
         while True:
-            msg = bus.recv(timeout=0.05)
             now = time.time()
+            if args.seconds and now - started > args.seconds:
+                break
+            msg = recv(bus)
             learning = now - started < args.baseline
 
-            if msg is not None and not msg.is_extended_id:
-                arb = msg.arbitration_id
-                for i, byte in enumerate(msg.data):
-                    key = (arb, i)
-                    prev = last.get(key)
-                    last[key] = byte
-                    if prev is None or prev == byte:
-                        continue
-                    if learning:
-                        noisy.add(key)          # drifts by itself - ignore later
-                    elif key not in noisy or args.all:
-                        delta = prev ^ byte
-                        bits = " ".join(f"bit{b}" for b in range(8) if delta >> b & 1)
-                        print(f"  {now-started:7.1f}s  {arb:03X}[{i}]  "
-                              f"0x{prev:02X} -> 0x{byte:02X}   {bits}")
+            if not announced and not learning:
+                announced = True
+                print(f"Baseline done - ignoring {len(det.noisy)} self-changing bytes.")
+                print("Now operate ONE control at a time (mode, regen, kickstand, "
+                      "brake, throttle).")
+                print("Ctrl-C to stop.")
+                sys.stdout.flush()
 
-            if learning and time.time() - started >= args.baseline:
-                started -= 0  # keep the clock; just announce the transition
-                print(f"Baseline done - ignoring {len(noisy)} self-changing bytes.")
-                print("Now operate ONE control at a time (kickstand, brake, throttle, "
-                      "lights, mode).\nCtrl-C to stop.\n")
-                # prevent re-announcing
-                args.baseline = -1
+            if msg is None or msg.is_extended_id:
+                continue
+            if logger is not None:
+                logger(msg)
+            for index, prev, new in det.feed(msg.arbitration_id, msg.data, learning):
+                printer.emit(now, det.seq, msg.arbitration_id, index, prev, new)
+                sys.stdout.flush()
     except KeyboardInterrupt:
         pass
     finally:
         bus.shutdown()
-    print(f"\nStopped. Suppressed bytes: "
-          f"{', '.join(f'{a:03X}[{b}]' for a, b in sorted(noisy)) or 'none'}")
+        if logger is not None:
+            logger.stop()
+
+    print(f"\nStopped. {printer.n} events. Suppressed bytes: {det.suppressed()}")
+    if args.log:
+        print(f"Raw capture kept at {args.log} - re-analyse with:  "
+              f"python3 {sys.argv[0]} transitions {args.log}")
     return 0
+
+
+def cmd_transitions(args):
+    """Replay the `events` analysis over a saved log, offline and repeatable."""
+    try:
+        messages = list(can.LogReader(args.input))
+    except Exception as exc:
+        sys.exit(f"could not read {args.input}: {exc}")
+    if not messages:
+        sys.exit(f"{args.input} contains no frames")
+
+    t0 = messages[0].timestamp
+    det = ChangeDetector(int(x, 16) for x in (args.ignore or ()))
+    printer = BurstPrinter(args.gap, t0)
+    span = messages[-1].timestamp - t0
+    print(f"{args.input}: {len(messages)} frames over {span:.1f}s, "
+          f"baseline {args.baseline:.0f}s, burst gap {args.gap:.2f}s")
+
+    for msg in messages:
+        if msg.is_extended_id:
+            continue
+        learning = msg.timestamp - t0 < args.baseline
+        for index, prev, new in det.feed(msg.arbitration_id, msg.data, learning):
+            printer.emit(msg.timestamp, det.seq, msg.arbitration_id, index, prev, new)
+
+    print(f"\n{printer.n} events. Suppressed bytes: {det.suppressed()}")
+    return 0
+
+
+# --------------------------------------------------------------------------- send
+
+
+def parse_frame(spec):
+    """cansend syntax: 490#1160000000000000  (hex id '#' hex data)."""
+    if "#" not in spec:
+        raise argparse.ArgumentTypeError(
+            f"{spec!r}: expected ID#DATA, e.g. 490#1160000000000000"
+        )
+    id_text, data_text = spec.split("#", 1)
+    data_text = data_text.replace(" ", "").replace(".", "")
+    try:
+        arb = int(id_text, 16)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{id_text!r} is not a hex CAN id")
+    if len(data_text) % 2:
+        raise argparse.ArgumentTypeError(f"{data_text!r} has an odd number of hex digits")
+    try:
+        data = bytes.fromhex(data_text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{data_text!r} is not hex")
+    if len(data) > 8:
+        raise argparse.ArgumentTypeError(f"{len(data)} data bytes; CAN 2.0 allows at most 8")
+    return can.Message(arbitration_id=arb, data=data, is_extended_id=arb > 0x7FF)
+
+
+def snapshot(bus, seconds):
+    """Latest payload per standard ID over a short listen."""
+    latest = {}
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        msg = recv(bus)
+        if msg is not None and not msg.is_extended_id:
+            latest[msg.arbitration_id] = bytes(msg.data)
+    return latest
+
+
+def demand_of(data):
+    """0x202[3:5] - the controller's current limit, and the witness that it
+    actually accepted a mode command rather than merely displaying one."""
+    return int.from_bytes(data[3:5], "little") if len(data) >= 5 else None
+
+
+def state_line(latest):
+    """The two bytes that carry mode and regen, decoded."""
+    parts = []
+    data = latest.get(0x490)
+    if data:
+        parts.append(f"0x490[0]=0x{data[0]:02X} {annotate(0x490, 0, data[0])}")
+    data = latest.get(0x202)
+    if data:
+        parts.append(f"0x202[0]=0x{data[0]:02X} {annotate(0x202, 0, data[0])} "
+                     f"demand={demand_of(data)}")
+    return "   ".join(parts) or "no 0x202/0x490 seen"
+
+
+def cmd_send(args):
+    """Transmit frames and report whether the bike's own state bytes moved."""
+    try:
+        bus = open_bus(args.port, args.bitrate, args.frame_type, "normal", args.serial_baud)
+    except Exception as exc:
+        sys.exit(f"could not open {args.port}: {exc}")
+
+    print("!! NORMAL mode - the adapter drives the bus and ACKs every frame.")
+    for msg in args.frame:
+        print(f"   will send {msg.arbitration_id:03X}#{msg.data.hex().upper()}"
+              f"  x{args.repeat} every {args.interval * 1000:.0f} ms")
+    if not args.now:
+        print("   Ctrl-C within 3s to abort.")
+        time.sleep(3)
+
+    # Listening has to continue THROUGH the burst, not just bracket it. On this
+    # bike an injected 0x490 is undone by the dash's own 5 Hz frame within
+    # 100 ms of the last injected one, so a before/after pair straddles the
+    # whole effect and reports "nothing changed" for a command that worked.
+    timeline = []
+    sent = 0
+    try:
+        for phase, seconds in (("before", args.watch),):
+            _collect(bus, time.time() + seconds, phase, timeline)
+
+        failed = False
+        for _ in range(args.repeat):
+            for msg in args.frame:
+                try:
+                    bus.send(msg)
+                    sent += 1
+                except Exception as exc:      # TX buffer full, bus-off
+                    print(f"!! send failed after {sent} frames: {exc}")
+                    failed = True
+                    break
+            if failed:
+                break
+            _collect(bus, time.time() + args.interval, "DURING", timeline)
+
+        _collect(bus, time.time() + args.watch, "after", timeline)
+    except KeyboardInterrupt:
+        print("\naborted")
+    finally:
+        bus.shutdown()
+
+    print(f"sent    {sent} frames\n")
+    _report(timeline)
+    return 0
+
+
+def _collect(bus, until, phase, timeline):
+    while time.time() < until:
+        msg = recv(bus)
+        if msg is not None and not msg.is_extended_id:
+            timeline.append((time.time(), phase, msg.arbitration_id, bytes(msg.data)))
+
+
+def _report(timeline):
+    """Per-phase state, then every change in the two bytes that carry it."""
+    if not timeline:
+        print("no frames heard - is the bus alive?")
+        return
+    t0 = timeline[0][0]
+    for phase in ("before", "DURING", "after"):
+        latest = {arb: data for _, p, arb, data in timeline if p == phase}
+        if latest:
+            print(f"  {phase:<7} {state_line(latest)}")
+
+    print("\n  changes in 0x202 / 0x490:")
+    prev = {}
+    for ts, phase, arb, data in timeline:
+        if arb not in (0x202, 0x490):
+            continue
+        key = (data[0], demand_of(data)) if arb == 0x202 else data[0]
+        if prev.get(arb) == key:
+            continue
+        seen_before, prev[arb] = arb in prev, key
+        if seen_before:
+            extra = f" demand={demand_of(data)}" if arb == 0x202 else ""
+            print(f"    {ts - t0:6.3f}s [{phase:>6}]  {arb:03X}[0]=0x{data[0]:02X}  "
+                  f"{annotate(arb, 0, data[0])}{extra}")
 
 
 # ---------------------------------------------------------------------------- log
@@ -385,7 +658,7 @@ def cmd_log(args):
             while True:
                 if args.seconds and started and time.time() - started > args.seconds:
                     break
-                msg = bus.recv(timeout=0.2)
+                msg = recv(bus, 0.2)
                 if msg is not None:
                     if started is None:
                         started = time.time()
@@ -441,8 +714,32 @@ def main():
     s.add_argument("-f", "--frame-type", choices=["STD", "EXT"], default="STD")
     s.add_argument("--baseline", type=float, default=15.0,
                    help="seconds of do-nothing used to learn the noisy bytes")
-    s.add_argument("--all", action="store_true", help="do not suppress noisy bytes")
+    s.add_argument("--gap", type=float, default=0.25,
+                   help="quiet time that separates one burst of changes from the next")
+    s.add_argument("--ignore", nargs="+", metavar="HEX", help="ignore these ids entirely")
+    s.add_argument("--log", metavar="FILE", help="also keep the raw capture (.asc/.blf/.csv)")
+    s.add_argument("-s", "--seconds", type=float, default=0, help="stop after N seconds")
     s.set_defaults(func=cmd_events)
+
+    s = sub.add_parser("transitions", help="re-run the events analysis over a saved log")
+    s.add_argument("input", help="a log written by `log` or by `events --log`")
+    s.add_argument("--baseline", type=float, default=15.0)
+    s.add_argument("--gap", type=float, default=0.25)
+    s.add_argument("--ignore", nargs="+", metavar="HEX", help="ignore these ids entirely")
+    s.set_defaults(func=cmd_transitions)
+
+    s = sub.add_parser("send", parents=[common],
+                       help="TRANSMIT frames - the only command that drives the bus")
+    s.add_argument("frame", nargs="+", type=parse_frame, metavar="ID#DATA",
+                   help="e.g. 490#1160000000000000")
+    s.add_argument("-b", "--bitrate", type=int, required=True)
+    s.add_argument("-f", "--frame-type", choices=["STD", "EXT"], default="STD")
+    s.add_argument("-n", "--repeat", type=int, default=1, help="send the set N times")
+    s.add_argument("-i", "--interval", type=float, default=0.02, help="seconds between frames")
+    s.add_argument("--watch", type=float, default=1.5, metavar="SEC",
+                   help="listen this long before and after, and diff the state bytes")
+    s.add_argument("--now", action="store_true", help="skip the 3s abort window")
+    s.set_defaults(func=cmd_send)
 
     s = sub.add_parser("log", parents=[common], help="record frames to a file")
     s.add_argument("-b", "--bitrate", type=int, required=True)
