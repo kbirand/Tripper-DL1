@@ -59,6 +59,45 @@ def _decode_lzfse(payload):
             os.unlink(out)
 
 
+def _encode_lzfse(payload):
+    """LZFSE-encode bytes: libcompression on macOS, the lzfse CLI elsewhere.
+
+    Mirrors `_decode_lzfse`. libcompression's encoder returns 0 both for a
+    genuine failure and for "the buffer you gave me was too small", so the
+    destination starts oversized and grows — LZFSE can expand incompressible
+    input, and a silent 0 here would write a truncated ride.
+    """
+    lib = ctypes.util.find_library("compression")
+    if lib:
+        c = ctypes.CDLL(lib)
+        c.compression_encode_buffer.restype = ctypes.c_size_t
+        c.compression_encode_buffer.argtypes = [
+            ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p,
+            ctypes.c_size_t, ctypes.c_void_p, ctypes.c_int,
+        ]
+        cap = len(payload) + (len(payload) >> 2) + (1 << 16)
+        for _ in range(6):
+            dst = ctypes.create_string_buffer(cap)
+            n = c.compression_encode_buffer(dst, cap, payload, len(payload),
+                                            None, COMPRESSION_LZFSE)
+            if n:
+                return dst.raw[:n]
+            cap *= 2
+        raise RuntimeError("LZFSE encode failed")
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as fin:
+        fin.write(payload)
+    out = fin.name + ".lzfse"
+    try:
+        subprocess.run([LZFSE_BIN, "-encode", "-i", fin.name, "-o", out],
+                       check=True)
+        with open(out, "rb") as f:
+            return f.read()
+    finally:
+        os.unlink(fin.name)
+        if os.path.exists(out):
+            os.unlink(out)
+
+
 def _load_json(path):
     """Whole decoded payload dict from a .trip, or an already-decoded json."""
     with open(path, "rb") as f:
@@ -194,18 +233,16 @@ class Ride:
 def save_trip(path, session, samples, version=1):
     """Write a .trip: "TRIP" + version byte + LZFSE-compressed JSON.
 
-    Encoding still needs the lzfse CLI ($LZFSE_BIN) — libcompression's encoder
-    is not wired up here because nothing in this repo writes .trip files
-    routinely; reading is the hot path.
+    Encodes through libcompression on macOS, the lzfse CLI elsewhere — the same
+    split as the decoder, so a repaired ride can be written on the machine the
+    rides are analysed on without building anything.
+
+    `version` is the file's own header byte and must be carried over from the
+    source file, not defaulted: it says how the app should parse the payload.
     """
     payload = json.dumps({"session": session, "samples": samples},
                          separators=(",", ":")).encode()
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as fin:
-        fin.write(payload)
-    out = fin.name + ".lzfse"
-    subprocess.run([LZFSE_BIN, "-encode", "-i", fin.name, "-o", out], check=True)
-    body = open(out, "rb").read()
-    os.unlink(fin.name); os.unlink(out)
+    body = _encode_lzfse(payload)
     with open(path, "wb") as f:
         f.write(b"TRIP")
         f.write(bytes([version]))

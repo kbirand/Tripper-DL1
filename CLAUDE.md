@@ -40,6 +40,46 @@ means its kinematic term negates gyro.z. Right roll rate = +gyro X. Raw-accel
 roll, right-positive, = `atan2(+accY, +accZ)`; the bike parked on its
 (left-side) kickstand reads ≈ −9.5° and anchors the sign.
 
+**The ZYX euler pitch out of that frame is nose-DOWN positive** (fixed
+2026-08-18). `asin(2(wy − zx))` — the aerospace extraction both `quatToEuler`
+in the firmware and `ReferenceFrame.eulerDegrees` in the app use — assumes Y
+right and Z down. With Y left and Z up, nose-up is a *negative* rotation about
+Y, so the pitch comes back negated; roll survives the swap untouched, which is
+why only half the attitude was wrong and it went unseen for months. Anchored on
+`Tripper_2026-08-16_14-40-56.trip`, 4728 standstill rows where the accelerometer
+is a true inclinometer: fusion pitch = **−0.982 × accel pitch − 2.55°, r =
+−0.994**; fusion roll = +1.046 × accel roll, r = +0.946. The app's fix is
+`PuckMotionMapper.pitchSign = -1`. The firmware's own copy is unfixed and
+cosmetic — it reaches only the OLED and the `/log` page, never the wire.
+
+A stopped bike is the cleanest attitude reference this project has: no
+acceleration to confuse with tilt, so `atan2(accX, hypot(accY, accZ))` is the
+true nose-up angle and `atan2(accY, accZ)` the true lean, mount offset aside.
+That offset is **−2.28°** on this bike, and it is recoverable from any ride
+rather than guessed: the median of (accel pitch − recorded slope) over rows
+that are stopped with no wheel movement for three seconds. Measured over the
+four 2026-08-16 rides it came out −2.27/−2.28/−2.28/−2.28° with an
+interquartile range under 0.06°. Use this reference to check any attitude
+claim before believing it.
+
+**Recording boundary:** rides before 2026-08-18 carry `puckFusionSlopeDegrees`
+inverted, and on the ~5% of rows where the estimator withdrew, `imuSlopeDegrees`
+and `pitchDegrees` carry that inverted value too. `tools/repair_slope_sign.py`
+rewrites them to what the fixed app would have recorded (originals copied to a
+`pre-signfix/` sibling directory). Don't compare slope signs across that
+boundary — same rule as the 2026-08-08 mirrored-lean one below.
+
+Two more app-side slope faults were fixed the same day, both firing only on a
+stationary bike whose wheel was spinning: the wheel's dv/dt was subtracted from
+the gravity reference unguarded (a 0 → 40 km/h → 0 wheel spike read as 1 g of
+braking, driving the grade to 174% on a 33° pitch), and the slope-source
+crossfade anchored on `?? 0`, fading up from an imaginary flat road. Rides from
+before the fix can be partly repaired with `tools/repair_standstill_slope.py`,
+which never replays the estimator — it rebuilds slope only where the bike is
+provably stopped, from the accelerometer and the mount offset it recovers from
+the ride itself. What it cannot reach are the rows where the accelerometer was
+being shaken AND no trustworthy row sits within two seconds either side.
+
 ## Packet protocol — the additive rule
 
 Never reorder or resize existing fields. New fields append; the app gates on
